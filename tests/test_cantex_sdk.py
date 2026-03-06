@@ -1,3 +1,6 @@
+# Copyright (c) 2026 CaviarNine
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 """Tests for cantex_sdk — signers and SDK."""
 from __future__ import annotations
 
