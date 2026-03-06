@@ -24,6 +24,7 @@ from cantex_sdk import (
     CantexError,
     CantexSDK,
     CantexTimeoutError,
+    InstrumentId,
     InstrumentInfo,
     IntentTradingKeySigner,
     OperatorKeySigner,
@@ -600,9 +601,9 @@ class TestPublicAPIMethods:
             assert result.address == "Cantex::1220xyz"
             assert result.user_id == "uid-info"
             assert len(result.tokens) == 1
-            assert result.tokens[0].instrument_id == "USDC"
+            assert result.tokens[0].instrument.id == "USDC"
             assert result.tokens[0].locked_amount == Decimal("50.0")
-            assert result.get_balance("USDC", "admin1") == Decimal("500.0")
+            assert result.get_balance(InstrumentId(id="USDC", admin="admin1")) == Decimal("500.0")
         await authed_sdk.close()
 
     async def test_get_account_admin(self, authed_sdk):
@@ -634,7 +635,7 @@ class TestPublicAPIMethods:
             assert result.has_intent_account
             assert not result.has_trading_account
             assert len(result.instruments) == 1
-            assert result.instruments[0].instrument_id == "Amulet"
+            assert result.instruments[0].instrument.id == "Amulet"
         await authed_sdk.close()
 
     async def test_get_pool_info(self, authed_sdk):
@@ -652,7 +653,9 @@ class TestPublicAPIMethods:
                 payload=SAMPLE_QUOTE_RAW,
             )
             result = await authed_sdk.get_swap_quote(
-                Decimal("100"), "USDC", "admin1", "BTC", "admin2",
+                Decimal("100"),
+                InstrumentId(id="USDC", admin="admin1"),
+                InstrumentId(id="BTC", admin="admin2"),
             )
             assert isinstance(result, SwapQuote)
             assert result.trade_price == Decimal("0.1548225750")
@@ -668,7 +671,7 @@ class TestPublicAPIMethods:
                     {"receiver": "alice", "amount": Decimal("10")},
                     {"receiver": "bob"},  # missing amount
                 ],
-                "USDC", "admin",
+                InstrumentId(id="USDC", admin="admin"),
             )
         await authed_sdk.close()
 
@@ -731,8 +734,8 @@ SAMPLE_TOKEN_RAW_EMPTY = {
 class TestTokenBalance:
     def test_from_raw(self):
         t = TokenBalance._from_raw(SAMPLE_TOKEN_RAW)
-        assert t.instrument_id == "USDC"
-        assert t.instrument_admin == "admin::usdc"
+        assert t.instrument.id == "USDC"
+        assert t.instrument.admin == "admin::usdc"
         assert t.instrument_name == "USD Coin"
         assert t.instrument_symbol == "USDC"
         assert t.unlocked_amount == Decimal("1234.56")
@@ -751,7 +754,7 @@ class TestTokenBalance:
     def test_frozen(self):
         t = TokenBalance._from_raw(SAMPLE_TOKEN_RAW)
         with pytest.raises(AttributeError):
-            t.instrument_id = "nope"
+            t.instrument = "nope"
 
 
 class TestAccountInfo:
@@ -765,16 +768,16 @@ class TestAccountInfo:
         assert info.address == "Cantex::1220abc"
         assert info.user_id == "uid-42"
         assert len(info.tokens) == 2
-        assert info.tokens[0].instrument_id == "USDC"
-        assert info.tokens[1].instrument_id == "BTC"
+        assert info.tokens[0].instrument.id == "USDC"
+        assert info.tokens[1].instrument.id == "BTC"
 
     def test_get_balance_found(self):
         info = AccountInfo._from_raw({"tokens": [SAMPLE_TOKEN_RAW]})
-        assert info.get_balance("USDC", "admin::usdc") == Decimal("1234.56")
+        assert info.get_balance(InstrumentId(id="USDC", admin="admin::usdc")) == Decimal("1234.56")
 
     def test_get_balance_not_found(self):
         info = AccountInfo._from_raw({"tokens": [SAMPLE_TOKEN_RAW]})
-        assert info.get_balance("ETH", "admin::eth") == Decimal(0)
+        assert info.get_balance(InstrumentId(id="ETH", admin="admin::eth")) == Decimal(0)
 
     def test_expired_transfer_cids(self):
         info = AccountInfo._from_raw(
@@ -792,7 +795,7 @@ class TestAccountInfo:
         info = AccountInfo._from_raw({"tokens": []})
         assert info.address == ""
         assert info.user_id == ""
-        assert info.get_balance("USDC", "admin") == Decimal(0)
+        assert info.get_balance(InstrumentId(id="USDC", admin="admin")) == Decimal(0)
         assert info.expired_transfer_cids == []
         assert info.expired_allocation_cids == []
 
@@ -806,8 +809,8 @@ class TestInstrumentInfo:
             "instrument_symbol": "CC",
         }
         info = InstrumentInfo._from_raw(raw)
-        assert info.instrument_id == "Amulet"
-        assert info.instrument_admin == "DSO::1220abc"
+        assert info.instrument.id == "Amulet"
+        assert info.instrument.admin == "DSO::1220abc"
         assert info.instrument_name == "Canton Coin"
         assert info.instrument_symbol == "CC"
 
@@ -820,7 +823,7 @@ class TestInstrumentInfo:
         }
         info = InstrumentInfo._from_raw(raw)
         with pytest.raises(AttributeError):
-            info.instrument_id = "nope"
+            info.instrument = "nope"
 
 
 SAMPLE_ADMIN_RAW = {
@@ -863,9 +866,9 @@ class TestAccountAdmin:
         assert admin.intent_account == {"contract_id": "ia-1"}
         assert admin.trading_account == {"contract_id": "ta-1"}
         assert len(admin.instruments) == 2
-        assert admin.instruments[0].instrument_id == "Amulet"
+        assert admin.instruments[0].instrument.id == "Amulet"
         assert admin.instruments[0].instrument_symbol == "CC"
-        assert admin.instruments[1].instrument_id == "USDCx"
+        assert admin.instruments[1].instrument.id == "USDCx"
 
     def test_from_raw_no_accounts(self):
         admin = AccountAdmin._from_raw(
@@ -897,8 +900,10 @@ class TestPool:
     def test_from_raw(self):
         p = Pool._from_raw(SAMPLE_POOL_RAW)
         assert p.contract_id == "pool-abc"
-        assert p.token_a_instrument_id == "USDC"
-        assert p.token_b_instrument_id == "BTC"
+        assert p.token_a.id == "USDC"
+        assert p.token_a.admin == "admin::usdc"
+        assert p.token_b.id == "BTC"
+        assert p.token_b.admin == "admin::btc"
 
     def test_frozen(self):
         p = Pool._from_raw(SAMPLE_POOL_RAW)
@@ -916,7 +921,7 @@ class TestPoolsInfo:
     def test_get_pool_found(self):
         info = PoolsInfo._from_raw({"pools": [SAMPLE_POOL_RAW]})
         pool = info.get_pool("pool-abc")
-        assert pool.token_a_instrument_id == "USDC"
+        assert pool.token_a.id == "USDC"
 
     def test_get_pool_not_found(self):
         info = PoolsInfo._from_raw({"pools": [SAMPLE_POOL_RAW]})
@@ -977,8 +982,8 @@ class TestQuoteLeg:
         }
         leg = QuoteLeg._from_raw(raw)
         assert leg.amount == Decimal("99.5")
-        assert leg.instrument_id == "USDCx"
-        assert leg.instrument_admin == "admin::usdc"
+        assert leg.instrument.id == "USDCx"
+        assert leg.instrument.admin == "admin::usdc"
 
     def test_frozen(self):
         leg = QuoteLeg._from_raw(
@@ -994,7 +999,7 @@ class TestQuoteFees:
         assert fees.fee_percentage == Decimal("0.0005000000")
         assert fees.amount_admin == Decimal("0.0000500000")
         assert fees.amount_liquidity == Decimal("0.0004500000")
-        assert fees.instrument_id == "Amulet"
+        assert fees.instrument.id == "Amulet"
         assert isinstance(fees.network_fee, QuoteLeg)
         assert fees.network_fee.amount == Decimal("0.1000")
 
@@ -1008,19 +1013,19 @@ class TestSwapQuote:
         assert q.pool_price_before_trade == Decimal("0.1548228128")
         assert q.pool_price_after_trade == Decimal("0.1548223373")
         assert q.sell_amount == Decimal("1")
-        assert q.sell_instrument_id == "Amulet"
-        assert q.buy_instrument_id == "USDCx"
+        assert q.sell_instrument.id == "Amulet"
+        assert q.buy_instrument.id == "USDCx"
 
     def test_returned_amount_property(self):
         q = SwapQuote._from_raw(SAMPLE_QUOTE_RAW)
         assert q.returned_amount == Decimal("0.1547451638")
         assert q.returned_amount == q.returned.amount
-        assert q.returned.instrument_id == "USDCx"
+        assert q.returned.instrument.id == "USDCx"
 
     def test_pool_size(self):
         q = SwapQuote._from_raw(SAMPLE_QUOTE_RAW)
         assert q.pool_size.amount == Decimal("1301596.7091451541")
-        assert q.pool_size.instrument_id == "Amulet"
+        assert q.pool_size.instrument.id == "Amulet"
 
     def test_fees(self):
         q = SwapQuote._from_raw(SAMPLE_QUOTE_RAW)

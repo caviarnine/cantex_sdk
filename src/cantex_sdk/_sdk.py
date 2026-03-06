@@ -28,6 +28,7 @@ __all__ = [
     "CantexAPIError",
     "CantexAuthError",
     "CantexTimeoutError",
+    "InstrumentId",
     "TokenBalance",
     "AccountInfo",
     "InstrumentInfo",
@@ -83,6 +84,18 @@ class TransferItem(TypedDict):
     amount: Decimal
 
 
+@dataclass(frozen=True)
+class InstrumentId:
+    """Unique identifier for a Canton instrument (token), combining the
+    instrument ID and its admin party."""
+
+    admin: str
+    id: str
+
+    def __str__(self) -> str:
+        return f"{self.id} (admin={self.admin})"
+
+
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
@@ -92,8 +105,7 @@ class TransferItem(TypedDict):
 class TokenBalance:
     """A single token's balance and pending operations from account info."""
 
-    instrument_id: str
-    instrument_admin: str
+    instrument: InstrumentId
     instrument_name: str
     instrument_symbol: str
     unlocked_amount: Decimal
@@ -106,8 +118,10 @@ class TokenBalance:
     def _from_raw(cls, data: dict) -> TokenBalance:
         balances = data.get("balances", {})
         return cls(
-            instrument_id=data["instrument_id"],
-            instrument_admin=data["instrument_admin"],
+            instrument=InstrumentId(
+                id=data["instrument_id"],
+                admin=data["instrument_admin"],
+            ),
             instrument_name=data.get("instrument_name", ""),
             instrument_symbol=data.get("instrument_symbol", ""),
             unlocked_amount=Decimal(balances.get("unlocked_amount", "0")),
@@ -135,15 +149,10 @@ class AccountInfo:
     user_id: str
     tokens: list[TokenBalance]
 
-    def get_balance(
-        self, instrument_id: str, instrument_admin: str,
-    ) -> Decimal:
+    def get_balance(self, instrument: InstrumentId) -> Decimal:
         """Return the unlocked balance for a specific token, or zero."""
         for token in self.tokens:
-            if (
-                token.instrument_id == instrument_id
-                and token.instrument_admin == instrument_admin
-            ):
+            if token.instrument == instrument:
                 return token.unlocked_amount
         return Decimal(0)
 
@@ -179,16 +188,17 @@ class AccountInfo:
 class InstrumentInfo:
     """Metadata for a registered instrument (token) from account admin."""
 
-    instrument_id: str
-    instrument_admin: str
+    instrument: InstrumentId
     instrument_name: str
     instrument_symbol: str
 
     @classmethod
     def _from_raw(cls, data: dict) -> InstrumentInfo:
         return cls(
-            instrument_id=data["instrument_id"],
-            instrument_admin=data["instrument_admin"],
+            instrument=InstrumentId(
+                id=data["instrument_id"],
+                admin=data["instrument_admin"],
+            ),
             instrument_name=data["instrument_name"],
             instrument_symbol=data["instrument_symbol"],
         )
@@ -232,19 +242,21 @@ class Pool:
     """A single liquidity pool from the pools info response."""
 
     contract_id: str
-    token_a_instrument_id: str
-    token_a_instrument_admin: str
-    token_b_instrument_id: str
-    token_b_instrument_admin: str
+    token_a: InstrumentId
+    token_b: InstrumentId
 
     @classmethod
     def _from_raw(cls, data: dict) -> Pool:
         return cls(
             contract_id=data["contract_id"],
-            token_a_instrument_id=data["token_a_instrument_id"],
-            token_a_instrument_admin=data["token_a_instrument_admin"],
-            token_b_instrument_id=data["token_b_instrument_id"],
-            token_b_instrument_admin=data["token_b_instrument_admin"],
+            token_a=InstrumentId(
+                id=data["token_a_instrument_id"],
+                admin=data["token_a_instrument_admin"],
+            ),
+            token_b=InstrumentId(
+                id=data["token_b_instrument_id"],
+                admin=data["token_b_instrument_admin"],
+            ),
         )
 
 
@@ -273,15 +285,16 @@ class QuoteLeg:
     """An amount + instrument pair within a swap quote."""
 
     amount: Decimal
-    instrument_id: str
-    instrument_admin: str
+    instrument: InstrumentId
 
     @classmethod
     def _from_raw(cls, data: dict) -> QuoteLeg:
         return cls(
             amount=Decimal(data["amount"]),
-            instrument_id=data["instrument_id"],
-            instrument_admin=data["instrument_admin"],
+            instrument=InstrumentId(
+                id=data["instrument_id"],
+                admin=data["instrument_admin"],
+            ),
         )
 
 
@@ -292,8 +305,7 @@ class QuoteFees:
     fee_percentage: Decimal
     amount_admin: Decimal
     amount_liquidity: Decimal
-    instrument_id: str
-    instrument_admin: str
+    instrument: InstrumentId
     network_fee: QuoteLeg
 
     @classmethod
@@ -302,8 +314,10 @@ class QuoteFees:
             fee_percentage=Decimal(data["fee_percentage"]),
             amount_admin=Decimal(data["amount_admin"]),
             amount_liquidity=Decimal(data["amount_liquidity"]),
-            instrument_id=data["instrument_id"],
-            instrument_admin=data["instrument_admin"],
+            instrument=InstrumentId(
+                id=data["instrument_id"],
+                admin=data["instrument_admin"],
+            ),
             network_fee=QuoteLeg._from_raw(data["network_fee"]),
         )
 
@@ -321,10 +335,8 @@ class SwapQuote:
     pool_size: QuoteLeg
     fees: QuoteFees
     sell_amount: Decimal
-    sell_instrument_id: str
-    sell_instrument_admin: str
-    buy_instrument_id: str
-    buy_instrument_admin: str
+    sell_instrument: InstrumentId
+    buy_instrument: InstrumentId
 
     @property
     def returned_amount(self) -> Decimal:
@@ -343,10 +355,14 @@ class SwapQuote:
             pool_size=QuoteLeg._from_raw(data["pool_size"]),
             fees=QuoteFees._from_raw(data["fees"]),
             sell_amount=Decimal(sent["sell_amount"]),
-            sell_instrument_id=sent["sell_instrument_id"],
-            sell_instrument_admin=sent["sell_instrument_admin"],
-            buy_instrument_id=sent["buy_instrument_id"],
-            buy_instrument_admin=sent["buy_instrument_admin"],
+            sell_instrument=InstrumentId(
+                id=sent["sell_instrument_id"],
+                admin=sent["sell_instrument_admin"],
+            ),
+            buy_instrument=InstrumentId(
+                id=sent["buy_instrument_id"],
+                admin=sent["buy_instrument_admin"],
+            ),
         )
 
 
@@ -964,10 +980,8 @@ class CantexSDK:
     async def get_swap_quote(
         self,
         sell_amount: Decimal,
-        sell_instrument_id: str,
-        sell_instrument_admin: str,
-        buy_instrument_id: str,
-        buy_instrument_admin: str,
+        sell_instrument: InstrumentId,
+        buy_instrument: InstrumentId,
     ) -> SwapQuote:
         """Get a price quote for swapping tokens in a liquidity pool."""
         data = await self._request(
@@ -975,10 +989,10 @@ class CantexSDK:
             "/v2/pools/quote",
             json_data={
                 "sellAmount": str(sell_amount),
-                "sellInstrumentId": sell_instrument_id,
-                "sellInstrumentAdmin": sell_instrument_admin,
-                "buyInstrumentId": buy_instrument_id,
-                "buyInstrumentAdmin": buy_instrument_admin,
+                "sellInstrumentId": sell_instrument.id,
+                "sellInstrumentAdmin": sell_instrument.admin,
+                "buyInstrumentId": buy_instrument.id,
+                "buyInstrumentAdmin": buy_instrument.admin,
             },
         )
         return SwapQuote._from_raw(data)
@@ -1002,20 +1016,19 @@ class CantexSDK:
     async def transfer(
         self,
         amount: Decimal,
-        instrument_id: str,
-        instrument_admin: str,
+        instrument: InstrumentId,
         receiver: str,
         memo: str = "",
     ) -> dict:
         """Transfer tokens to another account."""
         logger.info(
-            "Transferring %s %s to %s...", amount, instrument_id, receiver[:20],
+            "Transferring %s %s to %s...", amount, instrument.id, receiver[:20],
         )
         result = await self._build_sign_submit(
             "/v1/ledger/transaction/build/transfer",
             {
-                "instrumentAdmin": instrument_admin,
-                "instrumentId": instrument_id,
+                "instrumentAdmin": instrument.admin,
+                "instrumentId": instrument.id,
                 "receiver": receiver,
                 "amount": str(amount),
                 "memo": memo,
@@ -1027,8 +1040,7 @@ class CantexSDK:
     async def batch_transfer(
         self,
         transfers: list[TransferItem],
-        instrument_id: str,
-        instrument_admin: str,
+        instrument: InstrumentId,
         memo: str = "",
     ) -> dict:
         """Transfer tokens to multiple receivers in a single transaction.
@@ -1043,13 +1055,13 @@ class CantexSDK:
                 )
 
         logger.info(
-            "Batch transferring %d %s transfers...", len(transfers), instrument_id,
+            "Batch transferring %d %s transfers...", len(transfers), instrument.id,
         )
         result = await self._build_sign_submit(
             "/v1/ledger/transaction/build/batch_transfer",
             {
-                "instrumentAdmin": instrument_admin,
-                "instrumentId": instrument_id,
+                "instrumentAdmin": instrument.admin,
+                "instrumentId": instrument.id,
                 "transfers": [
                     {"receiver": t["receiver"], "amount": str(t["amount"])}
                     for t in transfers
@@ -1114,24 +1126,22 @@ class CantexSDK:
     async def swap(
         self,
         sell_amount: Decimal,
-        sell_instrument_id: str,
-        sell_instrument_admin: str,
-        buy_instrument_id: str,
-        buy_instrument_admin: str,
+        sell_instrument: InstrumentId,
+        buy_instrument: InstrumentId,
     ) -> dict:
         """Execute a token swap via the intent-based trading flow."""
         logger.info(
             "Intent swap: %s %s -> %s",
-            sell_amount, sell_instrument_id, buy_instrument_id,
+            sell_amount, sell_instrument.id, buy_instrument.id,
         )
         result = await self._build_sign_submit(
             "/v1/intent/build/pool/swap",
             {
                 "sellAmount": str(sell_amount),
-                "sellInstrumentId": sell_instrument_id,
-                "sellInstrumentAdmin": sell_instrument_admin,
-                "buyInstrumentId": buy_instrument_id,
-                "buyInstrumentAdmin": buy_instrument_admin,
+                "sellInstrumentId": sell_instrument.id,
+                "sellInstrumentAdmin": sell_instrument.admin,
+                "buyInstrumentId": buy_instrument.id,
+                "buyInstrumentAdmin": buy_instrument.admin,
             },
             intent=True,
         )

@@ -27,6 +27,7 @@ from cantex_sdk import (
     CantexAuthError,
     CantexSDK,
     CantexTimeoutError,
+    InstrumentId,
     IntentTradingKeySigner,
     OperatorKeySigner,
 )
@@ -67,10 +68,7 @@ async def main() -> None:
         log.info("Intent account exists: %s", admin.has_intent_account)
 
         for inst in admin.instruments:
-            log.info(
-                "  Instrument: %s (%s / %s)",
-                inst.instrument_name, inst.instrument_id, inst.instrument_symbol,
-            )
+            log.info("  Instrument: %s [%s]", inst.instrument_name, inst.instrument)
 
         # ── 5. Read account balances ───────────────────────────────────
         info = await sdk.get_account_info()
@@ -93,8 +91,8 @@ async def main() -> None:
             log.info(
                 "  Pool %s...: %s <-> %s",
                 pool.contract_id[:16],
-                pool.token_a_instrument_id,
-                pool.token_b_instrument_id,
+                pool.token_a.id,
+                pool.token_b.id,
             )
 
         # ── 7. Get a swap quote ────────────────────────────────────────
@@ -102,13 +100,11 @@ async def main() -> None:
             pool = pools.pools[0]
             quote = await sdk.get_swap_quote(
                 sell_amount=Decimal("1"),
-                sell_instrument_id=pool.token_a_instrument_id,
-                sell_instrument_admin=pool.token_a_instrument_admin,
-                buy_instrument_id=pool.token_b_instrument_id,
-                buy_instrument_admin=pool.token_b_instrument_admin,
+                sell_instrument=pool.token_a,
+                buy_instrument=pool.token_b,
             )
             log.info("Quote: trade_price=%s", quote.trade_price)
-            log.info("  Returned: %s %s", quote.returned_amount, quote.returned.instrument_id)
+            log.info("  Returned: %s %s", quote.returned_amount, quote.returned.instrument.id)
             log.info("  Slippage: %s", quote.slippage)
             log.info("  Fees: %s%%  (admin=%s, liquidity=%s, network=%s)",
                      quote.fees.fee_percentage,
@@ -126,10 +122,8 @@ async def main() -> None:
         #
         # result = await sdk.swap(
         #     sell_amount=Decimal("1"),
-        #     sell_instrument_id=pool.token_a_instrument_id,
-        #     sell_instrument_admin=pool.token_a_instrument_admin,
-        #     buy_instrument_id=pool.token_b_instrument_id,
-        #     buy_instrument_admin=pool.token_b_instrument_admin,
+        #     sell_instrument=pool.token_a,
+        #     buy_instrument=pool.token_b,
         # )
         # log.info("Swap result: %s", result)
 
@@ -138,8 +132,7 @@ async def main() -> None:
         #
         # result = await sdk.transfer(
         #     amount=Decimal("1.0"),
-        #     instrument_id="Amulet",
-        #     instrument_admin="DSO::1220...",
+        #     instrument=InstrumentId(admin="DSO::1220...", id="Amulet"),
         #     receiver="Cantex::1220...",
         #     memo="test transfer",
         # )
@@ -149,10 +142,8 @@ async def main() -> None:
         try:
             await sdk.get_swap_quote(
                 sell_amount=Decimal("0"),
-                sell_instrument_id="INVALID",
-                sell_instrument_admin="INVALID",
-                buy_instrument_id="INVALID",
-                buy_instrument_admin="INVALID",
+                sell_instrument=InstrumentId(admin="INVALID", id="INVALID"),
+                buy_instrument=InstrumentId(admin="INVALID", id="INVALID"),
             )
         except CantexAuthError as exc:
             log.error("Auth error (HTTP %d): %s", exc.status, exc.body[:100])
