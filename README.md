@@ -179,10 +179,6 @@ await sdk.batch_transfer(
 )
 ```
 
-#### `create_trading_account() -> dict`
-
-Create a pool trading account. Raises `RuntimeError` if one already exists.
-
 #### `create_intent_trading_account() -> dict`
 
 Create an intent trading account. Requires an `IntentTradingKeySigner`. Raises `RuntimeError` if one already exists.
