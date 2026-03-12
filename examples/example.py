@@ -6,7 +6,7 @@ Cantex SDK -- Example Usage
 
 Set the following environment variables before running:
 
-    export CANTEX_BASE_URL="https://api.testnet.cantex.io"
+    export CANTEX_BASE_URL="https://api.cantex.io"
     export CANTEX_OPERATOR_KEY="<operator Ed25519 private key hex>"
     export CANTEX_TRADING_KEY="<intent secp256k1 private key hex>"
 
@@ -41,7 +41,7 @@ log = logging.getLogger("example")
 
 async def main() -> None:
     # ── 1. Configuration from environment ──────────────────────────────
-    base_url = os.environ.get("CANTEX_BASE_URL", "https://api.testnet.cantex.io")
+    base_url = os.environ.get("CANTEX_BASE_URL", "https://api.cantex.io")
 
     operator_hex = os.environ.get("CANTEX_OPERATOR_KEY")
     if not operator_hex:
@@ -139,18 +139,18 @@ async def main() -> None:
         # log.info("Transfer result: %s", result)
 
         # ── 10. Error handling ─────────────────────────────────────────
-        try:
-            await sdk.get_swap_quote(
-                sell_amount=Decimal("0"),
-                sell_instrument=InstrumentId(admin="INVALID", id="INVALID"),
-                buy_instrument=InstrumentId(admin="INVALID", id="INVALID"),
-            )
-        except CantexAuthError as exc:
-            log.error("Auth error (HTTP %d): %s", exc.status, exc.body[:100])
-        except CantexAPIError as exc:
-            log.warning("API error (HTTP %d): %s", exc.status, exc.body[:100])
-        except CantexTimeoutError:
-            log.warning("Request timed out")
+        # try:
+        #     await sdk.get_swap_quote(
+        #         sell_amount=Decimal("0"),
+        #         sell_instrument=InstrumentId(admin="INVALID", id="INVALID"),
+        #         buy_instrument=InstrumentId(admin="INVALID", id="INVALID"),
+        #     )
+        # except CantexAuthError as exc:
+        #     log.error("Auth error (HTTP %d): %s", exc.status, exc.body[:100])
+        # except CantexAPIError as exc:
+        #     log.warning("API error (HTTP %d): %s", exc.status, exc.body[:100])
+        # except CantexTimeoutError:
+        #     log.warning("Request timed out")
 
     log.info("Done -- session closed")
 
