@@ -156,7 +156,7 @@ await sdk.get_swap_quote(
 )
 ```
 
-Returns a detailed quote including trade price, slippage, fee breakdown, pool price impact, and estimated execution time.
+Returns a detailed quote including prices, per-pool breakdown, fee details, and estimated execution time.
 
 ### Write Operations
 
@@ -278,43 +278,86 @@ Returned by `get_swap_quote()`.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `trade_price` | `Decimal` | Effective trade price |
-| `slippage` | `Decimal` | Estimated slippage |
 | `estimated_time_seconds` | `Decimal` | Estimated execution time |
-| `pool_price_before_trade` | `Decimal` | Pool price before the swap |
-| `pool_price_after_trade` | `Decimal` | Pool price after the swap |
 | `returned` | `QuoteLeg` | Amount and instrument being returned |
 | `pool_size` | `QuoteLeg` | Current pool size |
-| `fees` | `QuoteFees` | Fee breakdown |
+| `fees` | `QuoteFees` | Aggregate fee breakdown |
+| `prices` | `QuotePrices` | Aggregate price breakdown |
+| `pools` | `list[QuotePoolDetail]` | Per-pool breakdown (one entry per pool in the route) |
 | `sell_amount` | `Decimal` | Amount being sold |
-| `sell_instrument_id` | `str` | Sell instrument ID |
-| `sell_instrument_admin` | `str` | Sell instrument admin |
-| `buy_instrument_id` | `str` | Buy instrument ID |
-| `buy_instrument_admin` | `str` | Buy instrument admin |
+| `sell_instrument` | `InstrumentId` | Sell instrument |
+| `buy_instrument` | `InstrumentId` | Buy instrument |
 | `returned_amount` | `Decimal` (property) | Shortcut for `returned.amount` |
+
+**Deprecated fields** (still functional, emit `DeprecationWarning`):
+
+| Deprecated Field | Use Instead |
+| --- | --- |
+| `trade_price` | `prices.trade` |
+| `slippage` | `prices.slippage` |
+| `pool_price_before_trade` | `prices.pool_before` |
+| `pool_price_after_trade` | `prices.pool_after` |
+
+### `QuotePrices`
+
+Price breakdown used at both the top level (`SwapQuote.prices`) and per-pool level (`QuotePoolDetail.prices`).
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `pool_after` | `Decimal` | Pool price after the trade |
+| `pool_before` | `Decimal` | Pool price before the trade |
+| `slippage` | `Decimal` | Estimated slippage |
+| `trade` | `Decimal` | Effective trade price |
+| `trade_no_fees` | `Decimal` | Trade price excluding fees |
+
+### `QuotePoolDetail`
+
+One entry per pool in the swap route, inside `SwapQuote.pools`.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `buy` | `QuoteLeg` | Amount and instrument bought from this pool |
+| `sell` | `QuoteLeg` | Amount and instrument sold into this pool |
+| `contract_id` | `str` | Pool contract identifier |
+| `fees` | `QuotePoolFees` | Per-pool fee breakdown |
+| `pool_id` | `str` | Pool identifier |
+| `pool_price_after` | `Decimal` | Pool price after the trade |
+| `pool_price_before` | `Decimal` | Pool price before the trade |
+| `prices` | `QuotePrices` | Per-pool price breakdown |
+| `size` | `QuoteLeg` | Current pool size |
+| `trade_price` | `Decimal` | Effective trade price for this pool |
+| `trade_price_no_fees` | `Decimal` | Trade price excluding fees for this pool |
+
+### `QuotePoolFees`
+
+Per-pool fee breakdown inside `QuotePoolDetail.fees`.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `admin` | `QuoteLeg` | Admin fee (amount + instrument) |
+| `fee_percentage` | `Decimal` | Fee as a decimal fraction |
+| `liquidity` | `QuoteLeg` | Liquidity provider fee (amount + instrument) |
 
 ### `QuoteFees`
 
-Fee breakdown inside `SwapQuote.fees`.
+Aggregate fee breakdown inside `SwapQuote.fees`.
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `fee_percentage` | `Decimal` | Total fee as a decimal fraction |
 | `amount_admin` | `Decimal` | Admin fee amount |
 | `amount_liquidity` | `Decimal` | Liquidity provider fee amount |
-| `instrument_id` | `str` | Fee instrument ID |
-| `instrument_admin` | `str` | Fee instrument admin |
+| `instrument` | `InstrumentId` | Fee instrument |
 | `network_fee` | `QuoteLeg` | Network fee (amount + instrument) |
 
 ### `QuoteLeg`
 
-Reusable amount + instrument pair used in `SwapQuote.returned`, `SwapQuote.pool_size`, and `QuoteFees.network_fee`.
+Reusable amount + instrument pair used throughout the quote models.
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `amount` | `Decimal` | The amount |
-| `instrument_id` | `str` | Instrument ID |
-| `instrument_admin` | `str` | Instrument admin |
+| `instrument` | `InstrumentId` | Instrument identifier |
 
 ## Error Handling
 
@@ -352,7 +395,7 @@ The [`examples/example.py`](examples/example.py) script demonstrates the full SD
 2. Authenticate
 3. Query account admin and balances
 4. List pools
-5. Get a swap quote with fee/slippage inspection
+5. Get a swap quote with prices, per-pool breakdown, and fee inspection
 6. Error handling patterns
 
 Run it with:
