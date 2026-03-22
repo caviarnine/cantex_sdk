@@ -9,6 +9,7 @@ import getpass
 import json
 import logging
 import os
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal
@@ -36,6 +37,9 @@ __all__ = [
     "Pool",
     "PoolsInfo",
     "QuoteLeg",
+    "QuotePrices",
+    "QuotePoolFees",
+    "QuotePoolDetail",
     "QuoteFees",
     "SwapQuote",
     "TransferItem",
@@ -299,6 +303,77 @@ class QuoteLeg:
 
 
 @dataclass(frozen=True)
+class QuotePrices:
+    """Price breakdown used at both the top level and per-pool level."""
+
+    pool_after: Decimal
+    pool_before: Decimal
+    slippage: Decimal
+    trade: Decimal
+    trade_no_fees: Decimal
+
+    @classmethod
+    def _from_raw(cls, data: dict) -> QuotePrices:
+        return cls(
+            pool_after=Decimal(data["pool_after"]),
+            pool_before=Decimal(data["pool_before"]),
+            slippage=Decimal(data["slippage"]),
+            trade=Decimal(data["trade"]),
+            trade_no_fees=Decimal(data["trade_no_fees"]),
+        )
+
+
+@dataclass(frozen=True)
+class QuotePoolFees:
+    """Per-pool fee breakdown within a swap quote."""
+
+    admin: QuoteLeg
+    fee_percentage: Decimal
+    liquidity: QuoteLeg
+
+    @classmethod
+    def _from_raw(cls, data: dict) -> QuotePoolFees:
+        return cls(
+            admin=QuoteLeg._from_raw(data["admin"]),
+            fee_percentage=Decimal(data["fee_percentage"]),
+            liquidity=QuoteLeg._from_raw(data["liquidity"]),
+        )
+
+
+@dataclass(frozen=True)
+class QuotePoolDetail:
+    """A single pool's contribution to a multi-pool swap quote."""
+
+    buy: QuoteLeg
+    sell: QuoteLeg
+    contract_id: str
+    fees: QuotePoolFees
+    pool_id: str
+    pool_price_after: Decimal
+    pool_price_before: Decimal
+    prices: QuotePrices
+    size: QuoteLeg
+    trade_price: Decimal
+    trade_price_no_fees: Decimal
+
+    @classmethod
+    def _from_raw(cls, data: dict) -> QuotePoolDetail:
+        return cls(
+            buy=QuoteLeg._from_raw(data["buy"]),
+            sell=QuoteLeg._from_raw(data["sell"]),
+            contract_id=data["contract_id"],
+            fees=QuotePoolFees._from_raw(data["fees"]),
+            pool_id=data["pool_id"],
+            pool_price_after=Decimal(data["pool_price_after"]),
+            pool_price_before=Decimal(data["pool_price_before"]),
+            prices=QuotePrices._from_raw(data["prices"]),
+            size=QuoteLeg._from_raw(data["size"]),
+            trade_price=Decimal(data["trade_price"]),
+            trade_price_no_fees=Decimal(data["trade_price_no_fees"]),
+        )
+
+
+@dataclass(frozen=True)
 class QuoteFees:
     """Fee breakdown for a swap quote."""
 
@@ -326,17 +401,61 @@ class QuoteFees:
 class SwapQuote:
     """Parsed response from ``POST /v2/pools/quote``."""
 
-    trade_price: Decimal
-    slippage: Decimal
+    _trade_price: Decimal
+    _slippage: Decimal
     estimated_time_seconds: Decimal
-    pool_price_before_trade: Decimal
-    pool_price_after_trade: Decimal
+    _pool_price_before_trade: Decimal
+    _pool_price_after_trade: Decimal
     returned: QuoteLeg
     pool_size: QuoteLeg
     fees: QuoteFees
+    prices: QuotePrices
+    pools: list[QuotePoolDetail]
     sell_amount: Decimal
     sell_instrument: InstrumentId
     buy_instrument: InstrumentId
+
+    @property
+    def trade_price(self) -> Decimal:
+        """.. deprecated:: Use ``prices.trade`` instead."""
+        warnings.warn(
+            "SwapQuote.trade_price is deprecated, use SwapQuote.prices.trade",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._trade_price
+
+    @property
+    def slippage(self) -> Decimal:
+        """.. deprecated:: Use ``prices.slippage`` instead."""
+        warnings.warn(
+            "SwapQuote.slippage is deprecated, use SwapQuote.prices.slippage",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._slippage
+
+    @property
+    def pool_price_before_trade(self) -> Decimal:
+        """.. deprecated:: Use ``prices.pool_before`` instead."""
+        warnings.warn(
+            "SwapQuote.pool_price_before_trade is deprecated, "
+            "use SwapQuote.prices.pool_before",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._pool_price_before_trade
+
+    @property
+    def pool_price_after_trade(self) -> Decimal:
+        """.. deprecated:: Use ``prices.pool_after`` instead."""
+        warnings.warn(
+            "SwapQuote.pool_price_after_trade is deprecated, "
+            "use SwapQuote.prices.pool_after",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._pool_price_after_trade
 
     @property
     def returned_amount(self) -> Decimal:
@@ -346,14 +465,16 @@ class SwapQuote:
     def _from_raw(cls, data: dict) -> SwapQuote:
         sent = data["sent"]
         return cls(
-            trade_price=Decimal(data["trade_price"]),
-            slippage=Decimal(data["slippage"]),
+            _trade_price=Decimal(data["trade_price"]),
+            _slippage=Decimal(data["slippage"]),
             estimated_time_seconds=Decimal(data["estimated_time_seconds"]),
-            pool_price_before_trade=Decimal(data["pool_price_before_trade"]),
-            pool_price_after_trade=Decimal(data["pool_price_after_trade"]),
+            _pool_price_before_trade=Decimal(data["pool_price_before_trade"]),
+            _pool_price_after_trade=Decimal(data["pool_price_after_trade"]),
             returned=QuoteLeg._from_raw(data["returned"]),
             pool_size=QuoteLeg._from_raw(data["pool_size"]),
             fees=QuoteFees._from_raw(data["fees"]),
+            prices=QuotePrices._from_raw(data["prices"]),
+            pools=[QuotePoolDetail._from_raw(p) for p in data["pools"]],
             sell_amount=Decimal(sent["sell_amount"]),
             sell_instrument=InstrumentId(
                 id=sent["sell_instrument_id"],

@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import tempfile
+import warnings
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -32,6 +33,9 @@ from cantex_sdk import (
     PoolsInfo,
     QuoteFees,
     QuoteLeg,
+    QuotePoolDetail,
+    QuotePoolFees,
+    QuotePrices,
     SwapQuote,
     TokenBalance,
 )
@@ -658,10 +662,14 @@ class TestPublicAPIMethods:
                 InstrumentId(id="BTC", admin="admin2"),
             )
             assert isinstance(result, SwapQuote)
-            assert result.trade_price == Decimal("0.1548225750")
             assert result.returned_amount == Decimal("0.1547451638")
-            assert result.slippage == Decimal("0.0000015358")
             assert result.fees.fee_percentage == Decimal("0.0005000000")
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                assert result.trade_price == Decimal("0.1548225750")
+                assert result.slippage == Decimal("0.0000015358")
+                assert len(w) == 2
+                assert all(issubclass(x.category, DeprecationWarning) for x in w)
         await authed_sdk.close()
 
     async def test_batch_transfer_validation(self, authed_sdk):
@@ -956,6 +964,58 @@ SAMPLE_QUOTE_RAW = {
         "instrument_admin": "DSO::1220abc",
         "instrument_id": "Amulet",
     },
+    "pools": [
+        {
+            "buy": {
+                "amount": "51.6618488092",
+                "instrument_admin": "DSO::1220abc",
+                "instrument_id": "Amulet",
+            },
+            "contract_id": "pool-contract-001",
+            "fees": {
+                "admin": {
+                    "amount": "0.0003685538",
+                    "instrument_admin": "usdc-rep::1220def",
+                    "instrument_id": "USDCx",
+                },
+                "fee_percentage": "0.0005000000",
+                "liquidity": {
+                    "amount": "0.0033169843",
+                    "instrument_admin": "usdc-rep::1220def",
+                    "instrument_id": "USDCx",
+                },
+            },
+            "pool_id": "2820898830768735469",
+            "pool_price_after": "0.1426125549",
+            "pool_price_before": "0.1426033624",
+            "prices": {
+                "pool_after": "7.0120053636",
+                "pool_before": "7.0124573744",
+                "slippage": "0.0000322297",
+                "trade": "7.0087252497",
+                "trade_no_fees": "7.0122313653",
+            },
+            "sell": {
+                "amount": "7.3710763325",
+                "instrument_admin": "usdc-rep::1220def",
+                "instrument_id": "USDCx",
+            },
+            "size": {
+                "amount": "3205755.1364746202",
+                "instrument_admin": "DSO::1220abc",
+                "instrument_id": "Amulet",
+            },
+            "trade_price": "0.1426792982",
+            "trade_price_no_fees": "0.1426079586",
+        },
+    ],
+    "prices": {
+        "pool_after": "0.1548223373",
+        "pool_before": "0.1548228128",
+        "slippage": "0.0000015358",
+        "trade": "0.1548225750",
+        "trade_no_fees": "0.1548226500",
+    },
     "returned": {
         "amount": "0.1547451638",
         "instrument_admin": "usdc-rep::1220def",
@@ -1007,14 +1067,21 @@ class TestQuoteFees:
 class TestSwapQuote:
     def test_from_raw(self):
         q = SwapQuote._from_raw(SAMPLE_QUOTE_RAW)
-        assert q.trade_price == Decimal("0.1548225750")
-        assert q.slippage == Decimal("0.0000015358")
         assert q.estimated_time_seconds == Decimal("4.72")
-        assert q.pool_price_before_trade == Decimal("0.1548228128")
-        assert q.pool_price_after_trade == Decimal("0.1548223373")
         assert q.sell_amount == Decimal("1")
         assert q.sell_instrument.id == "Amulet"
         assert q.buy_instrument.id == "USDCx"
+
+    def test_deprecated_fields(self):
+        q = SwapQuote._from_raw(SAMPLE_QUOTE_RAW)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            assert q.trade_price == Decimal("0.1548225750")
+            assert q.slippage == Decimal("0.0000015358")
+            assert q.pool_price_before_trade == Decimal("0.1548228128")
+            assert q.pool_price_after_trade == Decimal("0.1548223373")
+            assert len(w) == 4
+            assert all(issubclass(x.category, DeprecationWarning) for x in w)
 
     def test_returned_amount_property(self):
         q = SwapQuote._from_raw(SAMPLE_QUOTE_RAW)
@@ -1033,7 +1100,102 @@ class TestSwapQuote:
         assert q.fees.fee_percentage == Decimal("0.0005000000")
         assert q.fees.network_fee.amount == Decimal("0.1000")
 
+    def test_prices(self):
+        q = SwapQuote._from_raw(SAMPLE_QUOTE_RAW)
+        assert isinstance(q.prices, QuotePrices)
+        assert q.prices.pool_after == Decimal("0.1548223373")
+        assert q.prices.pool_before == Decimal("0.1548228128")
+        assert q.prices.slippage == Decimal("0.0000015358")
+        assert q.prices.trade == Decimal("0.1548225750")
+        assert q.prices.trade_no_fees == Decimal("0.1548226500")
+
+    def test_pools(self):
+        q = SwapQuote._from_raw(SAMPLE_QUOTE_RAW)
+        assert len(q.pools) == 1
+        pool = q.pools[0]
+        assert isinstance(pool, QuotePoolDetail)
+        assert pool.contract_id == "pool-contract-001"
+        assert pool.pool_id == "2820898830768735469"
+        assert pool.buy.amount == Decimal("51.6618488092")
+        assert pool.sell.instrument.id == "USDCx"
+        assert pool.trade_price == Decimal("0.1426792982")
+        assert pool.trade_price_no_fees == Decimal("0.1426079586")
+        assert isinstance(pool.fees, QuotePoolFees)
+        assert pool.fees.admin.amount == Decimal("0.0003685538")
+        assert isinstance(pool.prices, QuotePrices)
+        assert pool.prices.trade == Decimal("7.0087252497")
+
     def test_frozen(self):
         q = SwapQuote._from_raw(SAMPLE_QUOTE_RAW)
         with pytest.raises(AttributeError):
-            q.trade_price = Decimal("2.0")
+            q.estimated_time_seconds = Decimal("2.0")
+
+
+class TestQuotePrices:
+    def test_from_raw(self):
+        raw = {
+            "pool_after": "7.0120053636",
+            "pool_before": "7.0124573744",
+            "slippage": "0.0000322297",
+            "trade": "7.0087252497",
+            "trade_no_fees": "7.0122313653",
+        }
+        prices = QuotePrices._from_raw(raw)
+        assert prices.pool_after == Decimal("7.0120053636")
+        assert prices.pool_before == Decimal("7.0124573744")
+        assert prices.slippage == Decimal("0.0000322297")
+        assert prices.trade == Decimal("7.0087252497")
+        assert prices.trade_no_fees == Decimal("7.0122313653")
+
+    def test_frozen(self):
+        prices = QuotePrices._from_raw({
+            "pool_after": "1", "pool_before": "2",
+            "slippage": "0", "trade": "3", "trade_no_fees": "4",
+        })
+        with pytest.raises(AttributeError):
+            prices.trade = Decimal("0")
+
+
+class TestQuotePoolFees:
+    def test_from_raw(self):
+        raw = SAMPLE_QUOTE_RAW["pools"][0]["fees"]
+        fees = QuotePoolFees._from_raw(raw)
+        assert fees.fee_percentage == Decimal("0.0005000000")
+        assert isinstance(fees.admin, QuoteLeg)
+        assert fees.admin.amount == Decimal("0.0003685538")
+        assert fees.admin.instrument.id == "USDCx"
+        assert isinstance(fees.liquidity, QuoteLeg)
+        assert fees.liquidity.amount == Decimal("0.0033169843")
+        assert fees.liquidity.instrument.id == "USDCx"
+
+    def test_frozen(self):
+        raw = SAMPLE_QUOTE_RAW["pools"][0]["fees"]
+        fees = QuotePoolFees._from_raw(raw)
+        with pytest.raises(AttributeError):
+            fees.fee_percentage = Decimal("1")
+
+
+class TestQuotePoolDetail:
+    def test_from_raw(self):
+        raw = SAMPLE_QUOTE_RAW["pools"][0]
+        pool = QuotePoolDetail._from_raw(raw)
+        assert pool.contract_id == "pool-contract-001"
+        assert pool.pool_id == "2820898830768735469"
+        assert pool.buy.amount == Decimal("51.6618488092")
+        assert pool.buy.instrument.id == "Amulet"
+        assert pool.sell.amount == Decimal("7.3710763325")
+        assert pool.sell.instrument.id == "USDCx"
+        assert pool.pool_price_after == Decimal("0.1426125549")
+        assert pool.pool_price_before == Decimal("0.1426033624")
+        assert pool.trade_price == Decimal("0.1426792982")
+        assert pool.trade_price_no_fees == Decimal("0.1426079586")
+        assert pool.size.amount == Decimal("3205755.1364746202")
+        assert pool.size.instrument.id == "Amulet"
+        assert isinstance(pool.fees, QuotePoolFees)
+        assert isinstance(pool.prices, QuotePrices)
+
+    def test_frozen(self):
+        raw = SAMPLE_QUOTE_RAW["pools"][0]
+        pool = QuotePoolDetail._from_raw(raw)
+        with pytest.raises(AttributeError):
+            pool.trade_price = Decimal("0")
