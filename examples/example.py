@@ -103,17 +103,18 @@ async def main() -> None:
                 sell_instrument=pool.token_a,
                 buy_instrument=pool.token_b,
             )
-            log.info("Quote: trade_price=%s", quote.trade_price)
+            log.info("Quote: trade_price=%s", quote.prices.trade)
             log.info("  Returned: %s %s", quote.returned_amount, quote.returned.instrument.id)
-            log.info("  Slippage: %s", quote.slippage)
+            log.info("  Slippage: %s", quote.prices.slippage)
+            log.info("  Trade (no fees): %s", quote.prices.trade_no_fees)
             log.info("  Fees: %s%%  (admin=%s, liquidity=%s, network=%s)",
                      quote.fees.fee_percentage,
                      quote.fees.amount_admin,
                      quote.fees.amount_liquidity,
                      quote.fees.network_fee.amount)
             log.info("  Pool price: %s -> %s",
-                     quote.pool_price_before_trade,
-                     quote.pool_price_after_trade)
+                     quote.prices.pool_before,
+                     quote.prices.pool_after)
             log.info("  Estimated time: %ss", quote.estimated_time_seconds)
 
         # ── 8. Execute a swap ────────────────────────────
