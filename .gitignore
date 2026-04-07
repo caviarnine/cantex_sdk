@@ -20,3 +20,6 @@ env/
 
 secrets/
 .env
+
+.cursor/
+.cursorignore

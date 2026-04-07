@@ -13,7 +13,7 @@ import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, TypedDict
+from typing import Any, Awaitable, Callable, TypedDict
 
 import aiohttp
 import ecdsa
@@ -43,9 +43,21 @@ __all__ = [
     "QuoteFees",
     "SwapQuote",
     "TransferItem",
+    "WsEvent",
+    "SwapPendingEvent",
+    "SwapFailedEvent",
+    "SwapExecutedEvent",
+    "FundingEvent",
+    "DepositPendingEvent",
+    "DepositConfirmedEvent",
+    "DepositRejectedEvent",
+    "WithdrawalRequestedEvent",
+    "WithdrawalCompletedEvent",
+    "WithdrawalFailedEvent",
     "BaseSigner",
     "OperatorKeySigner",
     "IntentTradingKeySigner",
+    "CantexWebSocket",
     "CantexSDK",
 ]
 
@@ -775,6 +787,395 @@ class IntentTradingKeySigner(BaseSigner):
 
 
 # ---------------------------------------------------------------------------
+# WebSocket event models
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WsEvent:
+    """Base class for all parsed WebSocket events.
+
+    Unknown event types are returned as plain ``WsEvent`` instances with
+    the type-specific payload available via :attr:`data`.
+    """
+
+    event_type: str
+    category: str
+    event_id: str
+    severity: str
+    source: str
+    user_id: str
+    wallet_address: str
+    created_at: str
+    data: dict
+    raw: dict
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> WsEvent:
+        return cls(
+            event_type=raw.get("type", ""),
+            category=raw.get("category", ""),
+            event_id=raw.get("event_id", ""),
+            severity=raw.get("severity", ""),
+            source=raw.get("source", ""),
+            user_id=raw.get("user_id", ""),
+            wallet_address=raw.get("wallet_address", ""),
+            created_at=raw.get("created_at", ""),
+            data=raw.get("data", {}),
+            raw=raw,
+        )
+
+
+@dataclass(frozen=True)
+class SwapPendingEvent(WsEvent):
+    """A swap has been submitted and is pending execution."""
+
+    swap_id: str
+    input_instrument: InstrumentId
+    output_instrument: InstrumentId
+    sender: str
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> SwapPendingEvent:
+        d = raw.get("data", {})
+        return cls(
+            **WsEvent._from_raw(raw).__dict__,
+            swap_id=d.get("id", ""),
+            input_instrument=InstrumentId(
+                id=d.get("input_instrument_id", {}).get("id", ""),
+                admin=d.get("input_instrument_id", {}).get("admin", ""),
+            ),
+            output_instrument=InstrumentId(
+                id=d.get("output_instrument_id", {}).get("id", ""),
+                admin=d.get("output_instrument_id", {}).get("admin", ""),
+            ),
+            sender=d.get("sender", ""),
+        )
+
+
+@dataclass(frozen=True)
+class SwapFailedEvent(WsEvent):
+    """A swap failed to execute."""
+
+    swap_id: str
+    input_instrument: InstrumentId
+    output_instrument: InstrumentId
+    sender: str
+    error: str
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> SwapFailedEvent:
+        d = raw.get("data", {})
+        details = d.get("details", {})
+        return cls(
+            **WsEvent._from_raw(raw).__dict__,
+            swap_id=d.get("id", ""),
+            input_instrument=InstrumentId(
+                id=d.get("input_instrument_id", {}).get("id", ""),
+                admin=d.get("input_instrument_id", {}).get("admin", ""),
+            ),
+            output_instrument=InstrumentId(
+                id=d.get("output_instrument_id", {}).get("id", ""),
+                admin=d.get("output_instrument_id", {}).get("admin", ""),
+            ),
+            sender=d.get("sender", ""),
+            error=details.get("error", ""),
+        )
+
+
+@dataclass(frozen=True)
+class SwapExecutedEvent(WsEvent):
+    """A swap was successfully executed (trade confirmation)."""
+
+    input_amount: Decimal
+    input_instrument: InstrumentId
+    output_amount: Decimal
+    output_instrument: InstrumentId
+    admin_fee_amount: Decimal
+    liquidity_fee_amount: Decimal
+    market: str
+    price: Decimal
+    ticker_ts: int
+    ledger_created_at: str
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> SwapExecutedEvent:
+        d = raw.get("data", {})
+        sd = d.get("swap_details", {})
+        tk = d.get("ticker", {})
+        return cls(
+            **WsEvent._from_raw(raw).__dict__,
+            input_amount=Decimal(sd.get("input_amount", "0")),
+            input_instrument=InstrumentId(
+                id=sd.get("input_instrument_id", {}).get("id", ""),
+                admin=sd.get("input_instrument_id", {}).get("admin", ""),
+            ),
+            output_amount=Decimal(sd.get("output_amount", "0")),
+            output_instrument=InstrumentId(
+                id=sd.get("output_instrument_id", {}).get("id", ""),
+                admin=sd.get("output_instrument_id", {}).get("admin", ""),
+            ),
+            admin_fee_amount=Decimal(sd.get("admin_fee_amount", "0")),
+            liquidity_fee_amount=Decimal(sd.get("liquidity_fee_amount", "0")),
+            market=tk.get("market", ""),
+            price=Decimal(tk.get("price", "0")),
+            ticker_ts=tk.get("ts", 0),
+            ledger_created_at=d.get("ledger_created_at", ""),
+        )
+
+
+@dataclass(frozen=True)
+class FundingEvent(WsEvent):
+    """Base for all funding events (deposits and withdrawals)."""
+
+    amount: Decimal
+    instrument: InstrumentId
+    sender: str
+    receiver: str
+    ledger_created_at: str
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> FundingEvent:
+        d = raw.get("data", {})
+        return cls(
+            **WsEvent._from_raw(raw).__dict__,
+            amount=Decimal(d.get("amount", "0")),
+            instrument=InstrumentId(
+                id=d.get("instrument_id", ""),
+                admin=d.get("instrument_admin", ""),
+            ),
+            sender=d.get("sender", ""),
+            receiver=d.get("receiver", ""),
+            ledger_created_at=d.get("ledger_created_at", ""),
+        )
+
+
+@dataclass(frozen=True)
+class DepositPendingEvent(FundingEvent):
+    """A deposit has been initiated and is pending confirmation."""
+
+    execute_before: str
+    requested_at: str
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> DepositPendingEvent:
+        d = raw.get("data", {})
+        return cls(
+            **FundingEvent._from_raw(raw).__dict__,
+            execute_before=d.get("execute_before", ""),
+            requested_at=d.get("requested_at", ""),
+        )
+
+
+@dataclass(frozen=True)
+class DepositConfirmedEvent(FundingEvent):
+    """A deposit was confirmed on the ledger."""
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> DepositConfirmedEvent:
+        return cls(**FundingEvent._from_raw(raw).__dict__)
+
+
+@dataclass(frozen=True)
+class DepositRejectedEvent(FundingEvent):
+    """A deposit was rejected."""
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> DepositRejectedEvent:
+        return cls(**FundingEvent._from_raw(raw).__dict__)
+
+
+@dataclass(frozen=True)
+class WithdrawalRequestedEvent(FundingEvent):
+    """A withdrawal has been requested and is pending execution."""
+
+    execute_before: str
+    requested_at: str
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> WithdrawalRequestedEvent:
+        d = raw.get("data", {})
+        return cls(
+            **FundingEvent._from_raw(raw).__dict__,
+            execute_before=d.get("execute_before", ""),
+            requested_at=d.get("requested_at", ""),
+        )
+
+
+@dataclass(frozen=True)
+class WithdrawalCompletedEvent(FundingEvent):
+    """A withdrawal was successfully completed."""
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> WithdrawalCompletedEvent:
+        return cls(**FundingEvent._from_raw(raw).__dict__)
+
+
+@dataclass(frozen=True)
+class WithdrawalFailedEvent(FundingEvent):
+    """A withdrawal failed."""
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> WithdrawalFailedEvent:
+        return cls(**FundingEvent._from_raw(raw).__dict__)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket event parser
+# ---------------------------------------------------------------------------
+
+_WS_EVENT_PARSERS: dict[str, type[WsEvent]] = {
+    "Pool.SwapPending": SwapPendingEvent,
+    "Pool.SwapFailed": SwapFailedEvent,
+    "Pool.SwapExecuted": SwapExecutedEvent,
+    "Funding.DepositPending": DepositPendingEvent,
+    "Funding.DepositConfirmed": DepositConfirmedEvent,
+    "Funding.DepositRejected": DepositRejectedEvent,
+    "Funding.WithdrawalRequested": WithdrawalRequestedEvent,
+    "Funding.WithdrawalCompleted": WithdrawalCompletedEvent,
+    "Funding.WithdrawalFailed": WithdrawalFailedEvent,
+}
+
+
+def _parse_ws_event(raw: dict) -> WsEvent:
+    """Parse a raw WebSocket JSON dict into a typed event."""
+    event_type = raw.get("type", "")
+    cls = _WS_EVENT_PARSERS.get(event_type, WsEvent)
+    return cls._from_raw(raw)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket wrapper
+# ---------------------------------------------------------------------------
+
+
+class CantexWebSocket:
+    """Async-iterable wrapper around an aiohttp WebSocket connection.
+
+    Yields typed :class:`WsEvent` instances for each incoming business
+    event.  Ping frames are answered with a pong automatically.
+    If the connection drops unexpectedly and a *reconnect* callable was
+    provided, the wrapper transparently reconnects with exponential backoff.
+
+    Usage::
+
+        async with sdk.connect_public_ws() as ws:
+            async for event in ws:
+                print(event.event_type, event.data)
+    """
+
+    def __init__(
+        self,
+        ws: aiohttp.ClientWebSocketResponse,
+        reconnect: Callable[[], Awaitable[aiohttp.ClientWebSocketResponse]] | None = None,
+        max_reconnects: int = 5,
+        reconnect_base_delay: float = 1.0,
+    ) -> None:
+        self._ws = ws
+        self._reconnect_fn = reconnect
+        self._max_reconnects = max_reconnects
+        self._reconnect_base_delay = reconnect_base_delay
+        self._closed_by_user = False
+
+    async def __aenter__(self) -> CantexWebSocket:
+        return self
+
+    async def __aexit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any) -> None:
+        await self.close()
+
+    def __aiter__(self) -> CantexWebSocket:
+        return self
+
+    async def _reconnect(self) -> None:
+        """Attempt to re-establish the WebSocket connection with backoff."""
+        if self._reconnect_fn is None:
+            raise RuntimeError("_reconnect called without a reconnect function")
+        for attempt in range(1, self._max_reconnects + 1):
+            wait = self._reconnect_base_delay * (2 ** (attempt - 1))
+            logger.warning(
+                "WS reconnecting (attempt %d/%d) in %.1fs...",
+                attempt, self._max_reconnects, wait,
+            )
+            await asyncio.sleep(wait)
+            try:
+                self._ws = await self._reconnect_fn()
+                logger.info("WS reconnected")
+                return
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+                logger.warning("WS reconnect attempt %d failed: %s", attempt, exc)
+        raise CantexError(
+            f"WebSocket reconnection failed after {self._max_reconnects} attempts"
+        )
+
+    async def __anext__(self) -> WsEvent:
+        while True:
+            msg = await self._ws.receive()
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                logger.debug("WS raw message: %s", msg.data)
+                try:
+                    raw = json.loads(msg.data)
+                except json.JSONDecodeError as exc:
+                    raise CantexError(f"Invalid JSON in WebSocket message: {msg.data[:200]}") from exc
+            elif msg.type == aiohttp.WSMsgType.BINARY:
+                logger.debug("WS binary message (%d bytes)", len(msg.data))
+                try:
+                    raw = json.loads(msg.data)
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    raise CantexError("Received non-JSON binary WebSocket message") from exc
+            elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
+                if self._closed_by_user or self._reconnect_fn is None:
+                    logger.info("WebSocket closed (code=%s)", msg.data)
+                    raise StopAsyncIteration
+                logger.warning("WebSocket closed unexpectedly (code=%s), reconnecting...", msg.data)
+                await self._reconnect()
+                continue
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                if self._reconnect_fn is None:
+                    raise CantexError(f"WebSocket error: {self._ws.exception()}")
+                logger.warning("WebSocket error: %s, reconnecting...", self._ws.exception())
+                await self._reconnect()
+                continue
+            else:
+                raise StopAsyncIteration
+
+            if raw.get("op") == "ping":
+                logger.debug("WS ping received, sending pong")
+                await self._ws.send_json({"op": "pong"})
+                continue
+
+            return _parse_ws_event(raw)
+
+    async def close(self) -> None:
+        """Close the underlying WebSocket connection."""
+        self._closed_by_user = True
+        if not self._ws.closed:
+            await self._ws.close()
+
+    @property
+    def closed(self) -> bool:
+        return self._ws.closed
+
+
+class _WebSocketConnect:
+    """Awaitable async-context-manager returned by the ``connect_*_ws`` methods."""
+
+    def __init__(self, coro: Any) -> None:
+        self._coro = coro
+        self._ws: CantexWebSocket | None = None
+
+    def __await__(self):
+        return self._coro.__await__()
+
+    async def __aenter__(self) -> CantexWebSocket:
+        self._ws = await self._coro
+        return self._ws
+
+    async def __aexit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any) -> None:
+        if self._ws is not None:
+            await self._ws.close()
+
+
+# ---------------------------------------------------------------------------
 # SDK
 # ---------------------------------------------------------------------------
 
@@ -820,6 +1221,7 @@ class CantexSDK:
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
         self._auth_lock = asyncio.Lock()
+        self._open_websockets: list[CantexWebSocket] = []
         self._load_api_key()
 
     def __repr__(self) -> str:
@@ -841,7 +1243,11 @@ class CantexSDK:
         return self._session
 
     async def close(self) -> None:
-        """Close the underlying HTTP session."""
+        """Close all open WebSocket connections and the underlying HTTP session."""
+        for ws in self._open_websockets:
+            if not ws.closed:
+                await ws.close()
+        self._open_websockets.clear()
         if self._session and not self._session.closed:
             await self._session.close()
 
@@ -877,6 +1283,11 @@ class CantexSDK:
     def public_key(self) -> str:
         """Operator public key in URL-safe base64 (for display / API usage)."""
         return self._operator_signer.get_public_key_b64()
+
+    @property
+    def _ws_base_url(self) -> str:
+        """WebSocket base URL derived from the HTTP base URL."""
+        return self.base_url.replace("https://", "wss://").replace("http://", "ws://")
 
     # -- HTTP helper ---------------------------------------------------------
 
@@ -1081,6 +1492,66 @@ class CantexSDK:
             },
         )
 
+    # -- WebSocket connections -----------------------------------------------
+
+    async def _ws_connect(
+        self,
+        path: str,
+        *,
+        authenticated: bool = False,
+    ) -> CantexWebSocket:
+        """Open a WebSocket connection and return a :class:`CantexWebSocket`.
+
+        The returned wrapper is tracked internally so it is closed
+        automatically when :meth:`close` is called.
+        """
+        session = await self._get_session()
+        url = f"{self._ws_base_url}{path}"
+        headers = self._auth_headers() if authenticated else {}
+        raw_ws = await session.ws_connect(url, headers=headers)
+        logger.info("WebSocket connected: %s", path)
+
+        async def reconnect() -> aiohttp.ClientWebSocketResponse:
+            s = await self._get_session()
+            h = self._auth_headers() if authenticated else {}
+            return await s.ws_connect(url, headers=h)
+
+        ws = CantexWebSocket(
+            raw_ws,
+            reconnect=reconnect,
+            max_reconnects=self._max_retries,
+            reconnect_base_delay=self._retry_base_delay,
+        )
+        self._open_websockets = [w for w in self._open_websockets if not w.closed]
+        self._open_websockets.append(ws)
+        return ws
+
+    def connect_public_ws(self) -> _WebSocketConnect:
+        """Connect to the public event stream (no authentication required).
+
+        Returns an awaitable async-context-manager::
+
+            async with sdk.connect_public_ws() as ws:
+                async for event in ws:
+                    print(event)
+        """
+        return _WebSocketConnect(self._ws_connect("/v1/ws/public"))
+
+    def connect_private_ws(self) -> _WebSocketConnect:
+        """Connect to the private event stream (requires authentication).
+
+        Call :meth:`authenticate` before using this method.
+
+        Returns an awaitable async-context-manager::
+
+            async with sdk.connect_private_ws() as ws:
+                async for event in ws:
+                    print(event)
+        """
+        return _WebSocketConnect(
+            self._ws_connect("/v1/ws/private", authenticated=True),
+        )
+
     # -- public API ----------------------------------------------------------
 
     async def get_account_info(self) -> AccountInfo:
@@ -1268,3 +1739,73 @@ class CantexSDK:
         )
         logger.debug("Intent swap submitted: %s", result)
         return result
+
+    async def swap_and_confirm(
+        self,
+        sell_amount: Decimal,
+        sell_instrument: InstrumentId,
+        buy_instrument: InstrumentId,
+        *,
+        timeout: float = 60.0,
+    ) -> SwapExecutedEvent:
+        """Execute a token swap and wait for on-ledger confirmation.
+
+        Connects to the private WebSocket **before** submitting the swap so
+        that the confirmation event is never missed, then listens for a
+        ``Pool.SwapExecuted`` or ``Pool.SwapFailed`` event.
+
+        Returns
+        -------
+        SwapExecutedEvent
+            The confirmed trade details including amounts, fees, and price.
+
+        Raises
+        ------
+        CantexError
+            If the swap fails (wraps the error from ``SwapFailedEvent``).
+        CantexTimeoutError
+            If no confirmation is received within *timeout* seconds.
+        """
+        ws = await self._ws_connect("/v1/ws/private", authenticated=True)
+        try:
+            logger.info(
+                "Intent swap: %s %s -> %s",
+                sell_amount, sell_instrument.id, buy_instrument.id,
+            )
+            await self._build_sign_submit(
+                "/v1/intent/build/pool/swap",
+                {
+                    "sellAmount": str(sell_amount),
+                    "sellInstrumentId": sell_instrument.id,
+                    "sellInstrumentAdmin": sell_instrument.admin,
+                    "buyInstrumentId": buy_instrument.id,
+                    "buyInstrumentAdmin": buy_instrument.admin,
+                },
+                intent=True,
+            )
+
+            async def _wait_for_confirmation() -> SwapExecutedEvent:
+                async for event in ws:
+                    if isinstance(event, SwapPendingEvent):
+                        logger.info("Swap pending (id=%s)", event.swap_id)
+                        continue
+                    if isinstance(event, SwapExecutedEvent):
+                        logger.info(
+                            "Swap confirmed: %s %s -> %s %s",
+                            event.input_amount, event.input_instrument.id,
+                            event.output_amount, event.output_instrument.id,
+                        )
+                        return event
+                    if isinstance(event, SwapFailedEvent):
+                        raise CantexError(f"Swap failed: {event.error}")
+                raise CantexError("WebSocket closed before swap confirmation")
+
+            return await asyncio.wait_for(
+                _wait_for_confirmation(), timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            raise CantexTimeoutError(
+                f"Swap confirmation timed out after {timeout}s"
+            ) from None
+        finally:
+            await ws.close()

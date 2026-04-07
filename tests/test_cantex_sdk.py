@@ -25,6 +25,11 @@ from cantex_sdk import (
     CantexError,
     CantexSDK,
     CantexTimeoutError,
+    CantexWebSocket,
+    DepositConfirmedEvent,
+    DepositPendingEvent,
+    DepositRejectedEvent,
+    FundingEvent,
     InstrumentId,
     InstrumentInfo,
     IntentTradingKeySigner,
@@ -36,10 +41,17 @@ from cantex_sdk import (
     QuotePoolDetail,
     QuotePoolFees,
     QuotePrices,
+    SwapExecutedEvent,
+    SwapFailedEvent,
+    SwapPendingEvent,
     SwapQuote,
     TokenBalance,
+    WithdrawalCompletedEvent,
+    WithdrawalFailedEvent,
+    WithdrawalRequestedEvent,
+    WsEvent,
 )
-from cantex_sdk._sdk import _b64_encode
+from cantex_sdk._sdk import _WebSocketConnect, _b64_encode, _parse_ws_event
 
 # ---------------------------------------------------------------------------
 # Fixtures — deterministic key material
@@ -81,7 +93,7 @@ def authed_sdk(sdk) -> CantexSDK:
 
 
 # ===================================================================
-# Helper tests
+# Helpers / utilities
 # ===================================================================
 
 
@@ -99,8 +111,21 @@ class TestB64Encode:
         assert _b64_encode(b"") == ""
 
 
+class TestRequireKey:
+    def test_present(self):
+        assert CantexSDK._require_key({"a": 1}, "a") == 1
+
+    def test_missing(self):
+        with pytest.raises(CantexError, match="Missing required key 'x'"):
+            CantexSDK._require_key({"a": 1}, "x")
+
+    def test_context_in_message(self):
+        with pytest.raises(CantexError, match="auth challenge"):
+            CantexSDK._require_key({}, "message", " (auth challenge)")
+
+
 # ===================================================================
-# OperatorKeySigner tests
+# Signers
 # ===================================================================
 
 
@@ -179,11 +204,6 @@ class TestOperatorKeySigner:
         assert "..." in r
 
 
-# ===================================================================
-# IntentTradingKeySigner tests
-# ===================================================================
-
-
 class TestIntentTradingKeySigner:
     def test_from_hex(self, intent):
         assert isinstance(intent, IntentTradingKeySigner)
@@ -243,7 +263,7 @@ class TestIntentTradingKeySigner:
 
 
 # ===================================================================
-# CantexSDK tests
+# SDK core — initialization, persistence & session lifecycle
 # ===================================================================
 
 
@@ -296,21 +316,21 @@ class TestCantexSDKApiKeyPersistence:
         assert (tmp_path / "api_key.txt").read_text() == "secret"
 
 
-class TestRequireKey:
-    def test_present(self):
-        assert CantexSDK._require_key({"a": 1}, "a") == 1
+@pytest.mark.asyncio
+class TestSessionLifecycle:
+    async def test_context_manager(self, operator):
+        async with CantexSDK(operator, base_url=BASE_URL, api_key_path=None) as sdk:
+            session = await sdk._get_session()
+            assert not session.closed
+        assert session.closed
 
-    def test_missing(self):
-        with pytest.raises(CantexError, match="Missing required key 'x'"):
-            CantexSDK._require_key({"a": 1}, "x")
-
-    def test_context_in_message(self):
-        with pytest.raises(CantexError, match="auth challenge"):
-            CantexSDK._require_key({}, "message", " (auth challenge)")
+    async def test_close_idempotent(self, sdk):
+        await sdk.close()
+        await sdk.close()  # should not raise
 
 
 # ===================================================================
-# SDK HTTP / _request tests
+# SDK HTTP / _request
 # ===================================================================
 
 
@@ -430,7 +450,7 @@ class TestRequest:
 
 
 # ===================================================================
-# Authentication tests
+# Authentication
 # ===================================================================
 
 
@@ -503,7 +523,7 @@ class TestAuthenticate:
 
 
 # ===================================================================
-# Build-sign-submit tests
+# Build-sign-submit
 # ===================================================================
 
 
@@ -570,7 +590,7 @@ class TestBuildSignSubmit:
 
 
 # ===================================================================
-# Public API method tests
+# Public API methods
 # ===================================================================
 
 
@@ -692,25 +712,7 @@ class TestPublicAPIMethods:
 
 
 # ===================================================================
-# Session lifecycle tests
-# ===================================================================
-
-
-@pytest.mark.asyncio
-class TestSessionLifecycle:
-    async def test_context_manager(self, operator):
-        async with CantexSDK(operator, base_url=BASE_URL, api_key_path=None) as sdk:
-            session = await sdk._get_session()
-            assert not session.closed
-        assert session.closed
-
-    async def test_close_idempotent(self, sdk):
-        await sdk.close()
-        await sdk.close()  # should not raise
-
-
-# ===================================================================
-# Response model tests
+# Response models — Account
 # ===================================================================
 
 
@@ -893,6 +895,11 @@ class TestAccountAdmin:
         assert not admin.has_intent_account
         assert not admin.has_trading_account
         assert admin.instruments == []
+
+
+# ===================================================================
+# Response models — Pool & quote
+# ===================================================================
 
 
 SAMPLE_POOL_RAW = {
@@ -1199,3 +1206,788 @@ class TestQuotePoolDetail:
         pool = QuotePoolDetail._from_raw(raw)
         with pytest.raises(AttributeError):
             pool.trade_price = Decimal("0")
+
+
+# ===================================================================
+# WebSocket — Event models
+# ===================================================================
+
+
+SAMPLE_WS_SWAP_PENDING_RAW = {
+    "category": "trading",
+    "created_at": "2026-04-07T05:57:54.896253+00:00",
+    "data": {
+        "created_at": "2026-04-07T05:57:54.899210+00:00",
+        "id": "8c8ad51f-2c8b-486f-bd3d-6a2b0e66f986",
+        "input_instrument_id": {
+            "admin": "usdc-rep::1220abc",
+            "id": "USDCx",
+        },
+        "output_instrument_id": {
+            "admin": "DSO::1220def",
+            "id": "Amulet",
+        },
+        "sender": "Cantex::1220sender",
+    },
+    "event_id": "b8b7f7c2-4fe8-4549-9001-8dd4fd8c5f2f",
+    "severity": "info",
+    "source": "ledger",
+    "type": "Pool.SwapPending",
+    "user_id": "uid-1",
+    "wallet_address": "Cantex::1220wallet",
+}
+
+SAMPLE_WS_SWAP_EXECUTED_RAW = {
+    "category": "trading",
+    "created_at": "2026-04-07T05:58:04.353447+00:00",
+    "data": {
+        "ledger_created_at": "2026-04-07T05:57:58.790361+00:00",
+        "swap_details": {
+            "admin_fee_amount": "0.0005538314",
+            "input_amount": "11.0766285914",
+            "input_instrument_id": {"admin": "usdc-rep::1220abc", "id": "USDCx"},
+            "liquidity_fee_amount": "0.0049844829",
+            "output_amount": "74.8590517011",
+            "output_instrument_id": {"admin": "DSO::1220def", "id": "Amulet"},
+        },
+        "ticker": {
+            "market": "CC-USDC",
+            "price": "0.14815",
+            "ts": 1775541451587,
+        },
+    },
+    "event_id": "bc324667-38fd-4fb8-8bdc-998472fbc802",
+    "severity": "info",
+    "source": "ledger",
+    "type": "Pool.SwapExecuted",
+    "user_id": "uid-1",
+    "wallet_address": "Cantex::1220wallet",
+}
+
+SAMPLE_WS_SWAP_FAILED_RAW = {
+    "category": "trading",
+    "created_at": "2026-04-07T06:00:00+00:00",
+    "data": {
+        "id": "fail-swap-id",
+        "input_instrument_id": {"admin": "usdc-rep::1220abc", "id": "USDCx"},
+        "output_instrument_id": {"admin": "DSO::1220def", "id": "Amulet"},
+        "sender": "Cantex::1220sender",
+        "details": {"error": "insufficient balance"},
+    },
+    "event_id": "ev-fail-1",
+    "severity": "error",
+    "source": "ledger",
+    "type": "Pool.SwapFailed",
+    "user_id": "uid-1",
+    "wallet_address": "Cantex::1220wallet",
+}
+
+SAMPLE_WS_DEPOSIT_PENDING_RAW = {
+    "category": "funding",
+    "created_at": "2026-04-07T06:01:00+00:00",
+    "data": {
+        "amount": "100.5",
+        "instrument_id": "USDCx",
+        "instrument_admin": "usdc-rep::1220abc",
+        "sender": "External::1220ext",
+        "receiver": "Cantex::1220wallet",
+        "ledger_created_at": "2026-04-07T06:01:01+00:00",
+        "execute_before": "2026-04-07T06:11:00+00:00",
+        "requested_at": "2026-04-07T06:00:59+00:00",
+    },
+    "event_id": "ev-dep-pend-1",
+    "severity": "info",
+    "source": "ledger",
+    "type": "Funding.DepositPending",
+    "user_id": "uid-1",
+    "wallet_address": "Cantex::1220wallet",
+}
+
+SAMPLE_WS_DEPOSIT_CONFIRMED_RAW = {
+    "category": "funding",
+    "created_at": "2026-04-07T06:02:00+00:00",
+    "data": {
+        "amount": "100.5",
+        "instrument_id": "USDCx",
+        "instrument_admin": "usdc-rep::1220abc",
+        "sender": "External::1220ext",
+        "receiver": "Cantex::1220wallet",
+        "ledger_created_at": "2026-04-07T06:02:01+00:00",
+    },
+    "event_id": "ev-dep-conf-1",
+    "severity": "info",
+    "source": "ledger",
+    "type": "Funding.DepositConfirmed",
+    "user_id": "uid-1",
+    "wallet_address": "Cantex::1220wallet",
+}
+
+SAMPLE_WS_DEPOSIT_REJECTED_RAW = {
+    "category": "funding",
+    "created_at": "2026-04-07T06:03:00+00:00",
+    "data": {
+        "amount": "50.0",
+        "instrument_id": "Amulet",
+        "instrument_admin": "DSO::1220def",
+        "sender": "External::1220ext",
+        "receiver": "Cantex::1220wallet",
+        "ledger_created_at": "2026-04-07T06:03:01+00:00",
+    },
+    "event_id": "ev-dep-rej-1",
+    "severity": "warning",
+    "source": "ledger",
+    "type": "Funding.DepositRejected",
+    "user_id": "uid-1",
+    "wallet_address": "Cantex::1220wallet",
+}
+
+SAMPLE_WS_WITHDRAWAL_REQUESTED_RAW = {
+    "category": "funding",
+    "created_at": "2026-04-07T06:04:00+00:00",
+    "data": {
+        "amount": "200.0",
+        "instrument_id": "USDCx",
+        "instrument_admin": "usdc-rep::1220abc",
+        "sender": "Cantex::1220wallet",
+        "receiver": "External::1220ext",
+        "ledger_created_at": "2026-04-07T06:04:01+00:00",
+        "execute_before": "2026-04-07T06:14:00+00:00",
+        "requested_at": "2026-04-07T06:03:59+00:00",
+    },
+    "event_id": "ev-wd-req-1",
+    "severity": "info",
+    "source": "ledger",
+    "type": "Funding.WithdrawalRequested",
+    "user_id": "uid-1",
+    "wallet_address": "Cantex::1220wallet",
+}
+
+SAMPLE_WS_WITHDRAWAL_COMPLETED_RAW = {
+    "category": "funding",
+    "created_at": "2026-04-07T06:05:00+00:00",
+    "data": {
+        "amount": "200.0",
+        "instrument_id": "USDCx",
+        "instrument_admin": "usdc-rep::1220abc",
+        "sender": "Cantex::1220wallet",
+        "receiver": "External::1220ext",
+        "ledger_created_at": "2026-04-07T06:05:01+00:00",
+    },
+    "event_id": "ev-wd-comp-1",
+    "severity": "info",
+    "source": "ledger",
+    "type": "Funding.WithdrawalCompleted",
+    "user_id": "uid-1",
+    "wallet_address": "Cantex::1220wallet",
+}
+
+SAMPLE_WS_WITHDRAWAL_FAILED_RAW = {
+    "category": "funding",
+    "created_at": "2026-04-07T06:06:00+00:00",
+    "data": {
+        "amount": "200.0",
+        "instrument_id": "USDCx",
+        "instrument_admin": "usdc-rep::1220abc",
+        "sender": "Cantex::1220wallet",
+        "receiver": "External::1220ext",
+        "ledger_created_at": "2026-04-07T06:06:01+00:00",
+    },
+    "event_id": "ev-wd-fail-1",
+    "severity": "error",
+    "source": "ledger",
+    "type": "Funding.WithdrawalFailed",
+    "user_id": "uid-1",
+    "wallet_address": "Cantex::1220wallet",
+}
+
+
+class TestWsEventParsing:
+    def test_parse_swap_pending(self):
+        event = _parse_ws_event(SAMPLE_WS_SWAP_PENDING_RAW)
+        assert isinstance(event, SwapPendingEvent)
+        assert event.event_type == "Pool.SwapPending"
+        assert event.category == "trading"
+        assert event.event_id == "b8b7f7c2-4fe8-4549-9001-8dd4fd8c5f2f"
+        assert event.severity == "info"
+        assert event.source == "ledger"
+        assert event.user_id == "uid-1"
+        assert event.wallet_address == "Cantex::1220wallet"
+        assert event.swap_id == "8c8ad51f-2c8b-486f-bd3d-6a2b0e66f986"
+        assert event.input_instrument.id == "USDCx"
+        assert event.input_instrument.admin == "usdc-rep::1220abc"
+        assert event.output_instrument.id == "Amulet"
+        assert event.output_instrument.admin == "DSO::1220def"
+        assert event.sender == "Cantex::1220sender"
+        assert event.raw is SAMPLE_WS_SWAP_PENDING_RAW
+
+    def test_parse_swap_executed(self):
+        event = _parse_ws_event(SAMPLE_WS_SWAP_EXECUTED_RAW)
+        assert isinstance(event, SwapExecutedEvent)
+        assert event.event_type == "Pool.SwapExecuted"
+        assert event.input_amount == Decimal("11.0766285914")
+        assert event.input_instrument.id == "USDCx"
+        assert event.output_amount == Decimal("74.8590517011")
+        assert event.output_instrument.id == "Amulet"
+        assert event.admin_fee_amount == Decimal("0.0005538314")
+        assert event.liquidity_fee_amount == Decimal("0.0049844829")
+        assert event.market == "CC-USDC"
+        assert event.price == Decimal("0.14815")
+        assert event.ticker_ts == 1775541451587
+        assert event.ledger_created_at == "2026-04-07T05:57:58.790361+00:00"
+
+    def test_parse_swap_failed(self):
+        event = _parse_ws_event(SAMPLE_WS_SWAP_FAILED_RAW)
+        assert isinstance(event, SwapFailedEvent)
+        assert event.event_type == "Pool.SwapFailed"
+        assert event.swap_id == "fail-swap-id"
+        assert event.error == "insufficient balance"
+        assert event.input_instrument.id == "USDCx"
+        assert event.output_instrument.id == "Amulet"
+        assert event.sender == "Cantex::1220sender"
+
+    def test_parse_deposit_pending(self):
+        event = _parse_ws_event(SAMPLE_WS_DEPOSIT_PENDING_RAW)
+        assert isinstance(event, DepositPendingEvent)
+        assert isinstance(event, FundingEvent)
+        assert event.event_type == "Funding.DepositPending"
+        assert event.amount == Decimal("100.5")
+        assert event.instrument.id == "USDCx"
+        assert event.instrument.admin == "usdc-rep::1220abc"
+        assert event.sender == "External::1220ext"
+        assert event.receiver == "Cantex::1220wallet"
+        assert event.ledger_created_at == "2026-04-07T06:01:01+00:00"
+        assert event.execute_before == "2026-04-07T06:11:00+00:00"
+        assert event.requested_at == "2026-04-07T06:00:59+00:00"
+
+    def test_parse_deposit_confirmed(self):
+        event = _parse_ws_event(SAMPLE_WS_DEPOSIT_CONFIRMED_RAW)
+        assert isinstance(event, DepositConfirmedEvent)
+        assert isinstance(event, FundingEvent)
+        assert event.event_type == "Funding.DepositConfirmed"
+        assert event.amount == Decimal("100.5")
+
+    def test_parse_deposit_rejected(self):
+        event = _parse_ws_event(SAMPLE_WS_DEPOSIT_REJECTED_RAW)
+        assert isinstance(event, DepositRejectedEvent)
+        assert isinstance(event, FundingEvent)
+        assert event.event_type == "Funding.DepositRejected"
+        assert event.amount == Decimal("50.0")
+        assert event.instrument.id == "Amulet"
+
+    def test_parse_withdrawal_requested(self):
+        event = _parse_ws_event(SAMPLE_WS_WITHDRAWAL_REQUESTED_RAW)
+        assert isinstance(event, WithdrawalRequestedEvent)
+        assert isinstance(event, FundingEvent)
+        assert event.event_type == "Funding.WithdrawalRequested"
+        assert event.amount == Decimal("200.0")
+        assert event.execute_before == "2026-04-07T06:14:00+00:00"
+        assert event.requested_at == "2026-04-07T06:03:59+00:00"
+
+    def test_parse_withdrawal_completed(self):
+        event = _parse_ws_event(SAMPLE_WS_WITHDRAWAL_COMPLETED_RAW)
+        assert isinstance(event, WithdrawalCompletedEvent)
+        assert isinstance(event, FundingEvent)
+        assert event.event_type == "Funding.WithdrawalCompleted"
+
+    def test_parse_withdrawal_failed(self):
+        event = _parse_ws_event(SAMPLE_WS_WITHDRAWAL_FAILED_RAW)
+        assert isinstance(event, WithdrawalFailedEvent)
+        assert isinstance(event, FundingEvent)
+        assert event.event_type == "Funding.WithdrawalFailed"
+
+    def test_parse_unknown_event_type(self):
+        raw = {
+            "type": "Unknown.EventType",
+            "category": "other",
+            "event_id": "ev-unknown",
+            "severity": "info",
+            "source": "system",
+            "user_id": "uid-2",
+            "wallet_address": "Cantex::1220other",
+            "created_at": "2026-04-07T07:00:00+00:00",
+            "data": {"custom_field": "custom_value"},
+        }
+        event = _parse_ws_event(raw)
+        assert type(event) is WsEvent
+        assert event.event_type == "Unknown.EventType"
+        assert event.data == {"custom_field": "custom_value"}
+
+    def test_frozen_swap_pending(self):
+        event = _parse_ws_event(SAMPLE_WS_SWAP_PENDING_RAW)
+        with pytest.raises(AttributeError):
+            event.swap_id = "new-id"
+
+    def test_frozen_swap_executed(self):
+        event = _parse_ws_event(SAMPLE_WS_SWAP_EXECUTED_RAW)
+        with pytest.raises(AttributeError):
+            event.input_amount = Decimal("0")
+
+    def test_frozen_funding(self):
+        event = _parse_ws_event(SAMPLE_WS_DEPOSIT_PENDING_RAW)
+        with pytest.raises(AttributeError):
+            event.amount = Decimal("0")
+
+    def test_frozen_base(self):
+        event = _parse_ws_event({"type": "X", "data": {}})
+        with pytest.raises(AttributeError):
+            event.event_type = "Y"
+
+
+# ===================================================================
+# WebSocket — Client
+# ===================================================================
+
+
+def _make_ws_msg(msg_type, data):
+    """Create an aiohttp.WSMessage for testing."""
+    return aiohttp.WSMessage(msg_type, data, None)
+
+
+def _mock_raw_ws(messages):
+    """Create a mock ClientWebSocketResponse that yields the given messages."""
+    mock_ws = AsyncMock(spec=aiohttp.ClientWebSocketResponse)
+    mock_ws.receive = AsyncMock(side_effect=messages)
+    mock_ws.closed = False
+    mock_ws.close = AsyncMock()
+    mock_ws.send_json = AsyncMock()
+    mock_ws.exception = lambda: Exception("ws error")
+    return mock_ws
+
+
+@pytest.mark.asyncio
+class TestCantexWebSocket:
+    async def test_text_message_yields_event(self):
+        raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_WS_SWAP_PENDING_RAW)),
+        ])
+        ws = CantexWebSocket(raw)
+        event = await ws.__anext__()
+        assert isinstance(event, SwapPendingEvent)
+        assert event.swap_id == "8c8ad51f-2c8b-486f-bd3d-6a2b0e66f986"
+
+    async def test_binary_message_yields_event(self):
+        raw = _mock_raw_ws([
+            _make_ws_msg(
+                aiohttp.WSMsgType.BINARY,
+                json.dumps(SAMPLE_WS_SWAP_EXECUTED_RAW).encode(),
+            ),
+        ])
+        ws = CantexWebSocket(raw)
+        event = await ws.__anext__()
+        assert isinstance(event, SwapExecutedEvent)
+        assert event.price == Decimal("0.14815")
+
+    async def test_ping_sends_pong_and_continues(self):
+        ping_msg = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT, json.dumps({"op": "ping"}),
+        )
+        event_msg = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_WS_SWAP_PENDING_RAW),
+        )
+        raw = _mock_raw_ws([ping_msg, event_msg])
+        ws = CantexWebSocket(raw)
+        event = await ws.__anext__()
+        raw.send_json.assert_awaited_once_with({"op": "pong"})
+        assert isinstance(event, SwapPendingEvent)
+
+    async def test_invalid_json_raises_cantex_error(self):
+        raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, "not valid json{"),
+        ])
+        ws = CantexWebSocket(raw)
+        with pytest.raises(CantexError, match="Invalid JSON"):
+            await ws.__anext__()
+
+    async def test_invalid_binary_raises_cantex_error(self):
+        raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.BINARY, b"\xff\xfe"),
+        ])
+        ws = CantexWebSocket(raw)
+        with pytest.raises(CantexError, match="non-JSON binary"):
+            await ws.__anext__()
+
+    async def test_close_stops_iteration_no_reconnect(self):
+        raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.CLOSE, None),
+        ])
+        ws = CantexWebSocket(raw, reconnect=None)
+        with pytest.raises(StopAsyncIteration):
+            await ws.__anext__()
+
+    async def test_close_stops_iteration_user_closed(self):
+        raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.CLOSE, None),
+        ])
+        reconnect_fn = AsyncMock()
+        ws = CantexWebSocket(raw, reconnect=reconnect_fn)
+        ws._closed_by_user = True
+        with pytest.raises(StopAsyncIteration):
+            await ws.__anext__()
+        reconnect_fn.assert_not_awaited()
+
+    async def test_close_reconnects_when_fn_provided(self):
+        new_raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_WS_SWAP_PENDING_RAW)),
+        ])
+        reconnect_fn = AsyncMock(return_value=new_raw)
+        old_raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.CLOSE, 1006),
+        ])
+        ws = CantexWebSocket(
+            old_raw,
+            reconnect=reconnect_fn,
+            max_reconnects=3,
+            reconnect_base_delay=0.0,
+        )
+        event = await ws.__anext__()
+        reconnect_fn.assert_awaited_once()
+        assert isinstance(event, SwapPendingEvent)
+
+    async def test_error_reconnects(self):
+        new_raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_WS_SWAP_EXECUTED_RAW)),
+        ])
+        reconnect_fn = AsyncMock(return_value=new_raw)
+        old_raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.ERROR, None),
+        ])
+        old_raw.exception = lambda: Exception("transport error")
+        ws = CantexWebSocket(
+            old_raw,
+            reconnect=reconnect_fn,
+            max_reconnects=3,
+            reconnect_base_delay=0.0,
+        )
+        event = await ws.__anext__()
+        reconnect_fn.assert_awaited_once()
+        assert isinstance(event, SwapExecutedEvent)
+
+    async def test_error_no_reconnect_raises(self):
+        raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.ERROR, None),
+        ])
+        raw.exception = lambda: Exception("transport error")
+        ws = CantexWebSocket(raw, reconnect=None)
+        with pytest.raises(CantexError, match="WebSocket error"):
+            await ws.__anext__()
+
+    async def test_reconnect_exhausted_raises(self):
+        old_raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.CLOSE, 1006),
+        ])
+        reconnect_fn = AsyncMock(
+            side_effect=aiohttp.ClientConnectionError("refused"),
+        )
+        ws = CantexWebSocket(
+            old_raw,
+            reconnect=reconnect_fn,
+            max_reconnects=2,
+            reconnect_base_delay=0.0,
+        )
+        with pytest.raises(CantexError, match="reconnection failed after 2"):
+            await ws.__anext__()
+        assert reconnect_fn.await_count == 2
+
+    async def test_user_close(self):
+        raw = _mock_raw_ws([])
+        ws = CantexWebSocket(raw)
+        assert not ws._closed_by_user
+        await ws.close()
+        assert ws._closed_by_user
+        raw.close.assert_awaited_once()
+
+    async def test_close_idempotent(self):
+        raw = _mock_raw_ws([])
+        raw.closed = False
+        ws = CantexWebSocket(raw)
+        await ws.close()
+        raw.closed = True
+        await ws.close()
+        raw.close.assert_awaited_once()
+
+    async def test_closed_property(self):
+        raw = _mock_raw_ws([])
+        raw.closed = False
+        ws = CantexWebSocket(raw)
+        assert not ws.closed
+        raw.closed = True
+        assert ws.closed
+
+    async def test_context_manager(self):
+        raw = _mock_raw_ws([])
+        ws = CantexWebSocket(raw)
+        async with ws as ctx:
+            assert ctx is ws
+        raw.close.assert_awaited_once()
+
+    async def test_reconnect_without_fn_raises_runtime_error(self):
+        raw = _mock_raw_ws([])
+        ws = CantexWebSocket(raw, reconnect=None)
+        with pytest.raises(RuntimeError, match="reconnect function"):
+            await ws._reconnect()
+
+
+@pytest.mark.asyncio
+class TestWebSocketConnect:
+    async def test_async_context_manager(self):
+        raw = _mock_raw_ws([])
+        inner_ws = CantexWebSocket(raw)
+
+        async def coro():
+            return inner_ws
+
+        connect = _WebSocketConnect(coro())
+        async with connect as ws:
+            assert ws is inner_ws
+        raw.close.assert_awaited_once()
+
+    async def test_await(self):
+        raw = _mock_raw_ws([])
+        inner_ws = CantexWebSocket(raw)
+
+        async def coro():
+            return inner_ws
+
+        connect = _WebSocketConnect(coro())
+        ws = await connect
+        assert ws is inner_ws
+
+
+# ===================================================================
+# WebSocket — SDK integration & swap_and_confirm
+# ===================================================================
+
+
+@pytest.mark.asyncio
+class TestSDKWebSocketMethods:
+    async def test_ws_base_url_https(self, operator):
+        sdk = CantexSDK(
+            operator, base_url="https://api.cantex.io", api_key_path=None,
+        )
+        assert sdk._ws_base_url == "wss://api.cantex.io"
+        await sdk.close()
+
+    async def test_ws_base_url_http(self, operator):
+        sdk = CantexSDK(
+            operator, base_url="http://localhost:8080", api_key_path=None,
+        )
+        assert sdk._ws_base_url == "ws://localhost:8080"
+        await sdk.close()
+
+    async def test_connect_public_ws_url(self, authed_sdk):
+        mock_raw_ws = _mock_raw_ws([])
+        with patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, return_value=mock_raw_ws,
+        ) as mock_connect:
+            ws = await authed_sdk.connect_public_ws()
+            mock_connect.assert_awaited_once()
+            call_args = mock_connect.call_args
+            assert "/v1/ws/public" in call_args[0][0]
+            assert call_args[1].get("headers") == {}
+            await ws.close()
+        await authed_sdk.close()
+
+    async def test_connect_private_ws_url(self, authed_sdk):
+        mock_raw_ws = _mock_raw_ws([])
+        with patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, return_value=mock_raw_ws,
+        ) as mock_connect:
+            ws = await authed_sdk.connect_private_ws()
+            mock_connect.assert_awaited_once()
+            call_args = mock_connect.call_args
+            assert "/v1/ws/private" in call_args[0][0]
+            headers = call_args[1].get("headers", {})
+            assert "Authorization" in headers
+            assert headers["Authorization"] == "Bearer test-api-key"
+            await ws.close()
+        await authed_sdk.close()
+
+    async def test_close_cleans_up_websockets(self, authed_sdk):
+        mock_raw_ws = _mock_raw_ws([])
+        with patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, return_value=mock_raw_ws,
+        ):
+            ws = await authed_sdk.connect_public_ws()
+            assert len(authed_sdk._open_websockets) == 1
+            assert not ws.closed
+        await authed_sdk.close()
+        assert authed_sdk._open_websockets == []
+        mock_raw_ws.close.assert_awaited()
+
+    async def test_prune_closed_websockets(self, authed_sdk):
+        mock_ws_1 = _mock_raw_ws([])
+        mock_ws_2 = _mock_raw_ws([])
+        mock_ws_3 = _mock_raw_ws([])
+        mocks = iter([mock_ws_1, mock_ws_2, mock_ws_3])
+        with patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, side_effect=lambda *a, **kw: next(mocks),
+        ):
+            ws1 = await authed_sdk.connect_public_ws()
+            ws2 = await authed_sdk.connect_public_ws()
+            assert len(authed_sdk._open_websockets) == 2
+
+            await ws1.close()
+            mock_ws_1.closed = True
+
+            _ = await authed_sdk.connect_public_ws()
+            assert len(authed_sdk._open_websockets) == 2
+            assert ws1 not in authed_sdk._open_websockets
+        await authed_sdk.close()
+
+
+DIGEST_HEX = "00" * 32
+
+
+def _intent_build_submit_mocks(m):
+    """Register aioresponses mocks for the intent build + submit flow."""
+    m.post(
+        f"{BASE_URL}/v1/intent/build/pool/swap",
+        payload={"id": "build-swap-1", "intent": {"digest": DIGEST_HEX}},
+    )
+    m.post(
+        f"{BASE_URL}/v1/intent/submit",
+        payload={"status": "submitted"},
+    )
+
+
+@pytest.mark.asyncio
+class TestSwapAndConfirm:
+    async def test_success_pending_then_executed(self, authed_sdk):
+        """SwapPending followed by SwapExecuted returns the executed event."""
+        mock_ws = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_WS_SWAP_PENDING_RAW)),
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_WS_SWAP_EXECUTED_RAW)),
+        ])
+        with aioresponses() as m, patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, return_value=mock_ws,
+        ):
+            _intent_build_submit_mocks(m)
+            result = await authed_sdk.swap_and_confirm(
+                sell_amount=Decimal("11"),
+                sell_instrument=InstrumentId(id="USDCx", admin="usdc-rep::1220abc"),
+                buy_instrument=InstrumentId(id="Amulet", admin="DSO::1220def"),
+            )
+            assert isinstance(result, SwapExecutedEvent)
+            assert result.input_instrument.id == "USDCx"
+            assert result.output_instrument.id == "Amulet"
+            assert result.input_amount == Decimal("11.0766285914")
+        await authed_sdk.close()
+
+    async def test_success_executed_immediately(self, authed_sdk):
+        """SwapExecuted without a preceding SwapPending still works."""
+        mock_ws = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_WS_SWAP_EXECUTED_RAW)),
+        ])
+        with aioresponses() as m, patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, return_value=mock_ws,
+        ):
+            _intent_build_submit_mocks(m)
+            result = await authed_sdk.swap_and_confirm(
+                sell_amount=Decimal("11"),
+                sell_instrument=InstrumentId(id="USDCx", admin="usdc-rep::1220abc"),
+                buy_instrument=InstrumentId(id="Amulet", admin="DSO::1220def"),
+            )
+            assert isinstance(result, SwapExecutedEvent)
+        await authed_sdk.close()
+
+    async def test_swap_failed_raises(self, authed_sdk):
+        """SwapFailedEvent causes CantexError with the error message."""
+        mock_ws = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_WS_SWAP_PENDING_RAW)),
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_WS_SWAP_FAILED_RAW)),
+        ])
+        with aioresponses() as m, patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, return_value=mock_ws,
+        ):
+            _intent_build_submit_mocks(m)
+            with pytest.raises(CantexError, match="Swap failed: insufficient balance"):
+                await authed_sdk.swap_and_confirm(
+                    sell_amount=Decimal("11"),
+                    sell_instrument=InstrumentId(id="USDCx", admin="usdc-rep::1220abc"),
+                    buy_instrument=InstrumentId(id="Amulet", admin="DSO::1220def"),
+                )
+        await authed_sdk.close()
+
+    async def test_timeout_raises(self, authed_sdk):
+        """No confirmation within timeout raises CantexTimeoutError."""
+        async def hang_forever():
+            await asyncio.sleep(999)
+            return _make_ws_msg(aiohttp.WSMsgType.TEXT, "{}")
+
+        mock_ws = _mock_raw_ws([])
+        mock_ws.receive = AsyncMock(side_effect=hang_forever)
+        with aioresponses() as m, patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, return_value=mock_ws,
+        ):
+            _intent_build_submit_mocks(m)
+            with pytest.raises(CantexTimeoutError, match="timed out after 0.1s"):
+                await authed_sdk.swap_and_confirm(
+                    sell_amount=Decimal("11"),
+                    sell_instrument=InstrumentId(id="USDCx", admin="usdc-rep::1220abc"),
+                    buy_instrument=InstrumentId(id="Amulet", admin="DSO::1220def"),
+                    timeout=0.1,
+                )
+        await authed_sdk.close()
+
+    async def test_ignores_non_trading_events(self, authed_sdk):
+        """Funding events are ignored while waiting for swap confirmation."""
+        mock_ws = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_WS_DEPOSIT_CONFIRMED_RAW)),
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_WS_SWAP_EXECUTED_RAW)),
+        ])
+        with aioresponses() as m, patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, return_value=mock_ws,
+        ):
+            _intent_build_submit_mocks(m)
+            result = await authed_sdk.swap_and_confirm(
+                sell_amount=Decimal("11"),
+                sell_instrument=InstrumentId(id="USDCx", admin="usdc-rep::1220abc"),
+                buy_instrument=InstrumentId(id="Amulet", admin="DSO::1220def"),
+            )
+            assert isinstance(result, SwapExecutedEvent)
+        await authed_sdk.close()
+
+    async def test_ws_closed_before_confirmation(self, authed_sdk):
+        """WS closing before any swap event raises CantexError."""
+        mock_ws = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.CLOSE, None),
+        ])
+        with aioresponses() as m, patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, return_value=mock_ws,
+        ):
+            _intent_build_submit_mocks(m)
+            with pytest.raises(CantexError, match="WebSocket closed before swap confirmation"):
+                await authed_sdk.swap_and_confirm(
+                    sell_amount=Decimal("11"),
+                    sell_instrument=InstrumentId(id="USDCx", admin="usdc-rep::1220abc"),
+                    buy_instrument=InstrumentId(id="Amulet", admin="DSO::1220def"),
+                )
+        await authed_sdk.close()
+
+    async def test_ws_closed_after_confirm(self, authed_sdk):
+        """The private WS is always closed after swap_and_confirm returns."""
+        mock_ws = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_WS_SWAP_EXECUTED_RAW)),
+        ])
+        with aioresponses() as m, patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, return_value=mock_ws,
+        ):
+            _intent_build_submit_mocks(m)
+            await authed_sdk.swap_and_confirm(
+                sell_amount=Decimal("11"),
+                sell_instrument=InstrumentId(id="USDCx", admin="usdc-rep::1220abc"),
+                buy_instrument=InstrumentId(id="Amulet", admin="DSO::1220def"),
+            )
+            mock_ws.close.assert_awaited()
+        await authed_sdk.close()

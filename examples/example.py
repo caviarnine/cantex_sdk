@@ -20,16 +20,19 @@ import logging
 import os
 import sys
 from decimal import Decimal
-from pathlib import Path
 
 from cantex_sdk import (
     CantexAPIError,
     CantexAuthError,
     CantexSDK,
     CantexTimeoutError,
+    FundingEvent,
     InstrumentId,
     IntentTradingKeySigner,
     OperatorKeySigner,
+    SwapExecutedEvent,
+    SwapFailedEvent,
+    SwapPendingEvent,
 )
 
 logging.basicConfig(
@@ -122,11 +125,26 @@ async def main() -> None:
         # sufficient balance:
         #
         # result = await sdk.swap(
-        #     sell_amount=Decimal("1"),
+        #     sell_amount=Decimal("10"),
         #     sell_instrument=pool.token_a,
         #     buy_instrument=pool.token_b,
         # )
         # log.info("Swap result: %s", result)
+
+        # ── 8b. Swap with confirmation ────────────────────────────────
+        # Like swap(), but waits for on-ledger confirmation via WebSocket.
+        # Returns a SwapExecutedEvent or raises on failure/timeout.
+        
+        confirmed = await sdk.swap_and_confirm(
+            sell_amount=Decimal("10"),
+            sell_instrument=pool.token_a,
+            buy_instrument=pool.token_b,
+            timeout=60.0,
+        )
+        log.info("Confirmed: %s %s -> %s %s (price=%s)",
+                 confirmed.input_amount, confirmed.input_instrument.id,
+                 confirmed.output_amount, confirmed.output_instrument.id,
+                 confirmed.price)
 
         # ── 9. Transfer tokens ─────────────────────────────────────────
         # Uncomment to actually transfer:
@@ -152,6 +170,44 @@ async def main() -> None:
         #     log.warning("API error (HTTP %d): %s", exc.status, exc.body[:100])
         # except CantexTimeoutError:
         #     log.warning("Request timed out")
+
+        # ── 11. Stream WebSocket events ────────────────────────────────
+        # log.info("Connecting to private WebSocket...")
+        # async with sdk.connect_private_ws() as ws:
+        #     log.info("Listening for events (Ctrl+C to stop)...")
+        #     async for event in ws:
+        #         if isinstance(event, SwapExecutedEvent):
+        #             log.info(
+        #                 "Swap confirmed: %s %s -> %s %s (price=%s)",
+        #                 event.input_amount, event.input_instrument.id,
+        #                 event.output_amount, event.output_instrument.id,
+        #                 event.price,
+        #             )
+        #         elif isinstance(event, SwapPendingEvent):
+        #             log.info(
+        #                 "Swap pending: %s -> %s (id=%s)",
+        #                 event.input_instrument.id,
+        #                 event.output_instrument.id,
+        #                 event.swap_id,
+        #             )
+        #         elif isinstance(event, SwapFailedEvent):
+        #             log.warning(
+        #                 "Swap failed: %s -> %s: %s",
+        #                 event.input_instrument.id,
+        #                 event.output_instrument.id,
+        #                 event.error,
+        #             )
+        #         elif isinstance(event, FundingEvent):
+        #             log.info(
+        #                 "%s: %s %s (%s -> %s)",
+        #                 event.event_type,
+        #                 event.amount,
+        #                 event.instrument.id,
+        #                 event.sender[:20],
+        #                 event.receiver[:20],
+        #             )
+        #         else:
+        #             log.info("Event [%s]: %s", event.event_type, event.data)
 
     log.info("Done -- session closed")
 
