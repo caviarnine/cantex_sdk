@@ -139,6 +139,7 @@ async def main() -> None:
             sell_amount=Decimal("10"),
             sell_instrument=pool.token_a,
             buy_instrument=pool.token_b,
+            max_network_fee=Decimal("0.5"),  # optional max network fee allowed by the swap
             timeout=60.0,
         )
         log.info("Confirmed: %s %s -> %s %s (price=%s)",

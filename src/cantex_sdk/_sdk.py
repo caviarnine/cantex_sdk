@@ -1720,21 +1720,26 @@ class CantexSDK:
         sell_amount: Decimal,
         sell_instrument: InstrumentId,
         buy_instrument: InstrumentId,
+        *,
+        max_network_fee: Decimal | None = None,
     ) -> dict:
         """Execute a token swap via the intent-based trading flow."""
         logger.info(
             "Intent swap: %s %s -> %s",
             sell_amount, sell_instrument.id, buy_instrument.id,
         )
+        payload: dict = {
+            "sellAmount": str(sell_amount),
+            "sellInstrumentId": sell_instrument.id,
+            "sellInstrumentAdmin": sell_instrument.admin,
+            "buyInstrumentId": buy_instrument.id,
+            "buyInstrumentAdmin": buy_instrument.admin,
+        }
+        if max_network_fee is not None:
+            payload["maxNetworkFee"] = str(max_network_fee)
         result = await self._build_sign_submit(
             "/v1/intent/build/pool/swap",
-            {
-                "sellAmount": str(sell_amount),
-                "sellInstrumentId": sell_instrument.id,
-                "sellInstrumentAdmin": sell_instrument.admin,
-                "buyInstrumentId": buy_instrument.id,
-                "buyInstrumentAdmin": buy_instrument.admin,
-            },
+            payload,
             intent=True,
         )
         logger.debug("Intent swap submitted: %s", result)
@@ -1746,6 +1751,7 @@ class CantexSDK:
         sell_instrument: InstrumentId,
         buy_instrument: InstrumentId,
         *,
+        max_network_fee: Decimal | None = None,
         timeout: float = 60.0,
     ) -> SwapExecutedEvent:
         """Execute a token swap and wait for on-ledger confirmation.
@@ -1772,15 +1778,18 @@ class CantexSDK:
                 "Intent swap: %s %s -> %s",
                 sell_amount, sell_instrument.id, buy_instrument.id,
             )
+            payload: dict = {
+                "sellAmount": str(sell_amount),
+                "sellInstrumentId": sell_instrument.id,
+                "sellInstrumentAdmin": sell_instrument.admin,
+                "buyInstrumentId": buy_instrument.id,
+                "buyInstrumentAdmin": buy_instrument.admin,
+            }
+            if max_network_fee is not None:
+                payload["maxNetworkFee"] = str(max_network_fee)
             await self._build_sign_submit(
                 "/v1/intent/build/pool/swap",
-                {
-                    "sellAmount": str(sell_amount),
-                    "sellInstrumentId": sell_instrument.id,
-                    "sellInstrumentAdmin": sell_instrument.admin,
-                    "buyInstrumentId": buy_instrument.id,
-                    "buyInstrumentAdmin": buy_instrument.admin,
-                },
+                payload,
                 intent=True,
             )
 

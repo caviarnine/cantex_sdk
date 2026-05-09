@@ -90,8 +90,10 @@ Use as an async context manager (`async with CantexSDK(...) as sdk`) or call `aw
 | `transfer(amount, instrument_id, instrument_admin, receiver, memo="")` | `dict` | Transfer tokens to another account |
 | `batch_transfer(transfers, instrument_id, instrument_admin, memo="")` | `dict` | Transfer to multiple receivers in one transaction |
 | `create_intent_trading_account()` | `dict` | Create an intent trading account |
-| `swap(sell_amount, sell_instrument_id, sell_instrument_admin, buy_instrument_id, buy_instrument_admin)` | `dict` | Execute a swap via the intent-based trading flow |
-| `swap_and_confirm(sell_amount, sell_instrument, buy_instrument, *, timeout=60.0)` | `SwapExecutedEvent` | Swap and wait for on-ledger confirmation via WebSocket |
+| `swap(sell_amount, sell_instrument, buy_instrument, *, max_network_fee=None)` | `dict` | Execute a swap via the intent-based trading flow |
+| `swap_and_confirm(sell_amount, sell_instrument, buy_instrument, *, max_network_fee=None, timeout=60.0)` | `SwapExecutedEvent` | Swap and wait for on-ledger confirmation via WebSocket |
+
+`max_network_fee` (optional `Decimal`) caps the network fee the swap is willing to pay.
 
 `swap_and_confirm` connects to the private WebSocket *before* submitting, so the confirmation event is never missed. Raises `CantexError` on swap failure or `CantexTimeoutError` on timeout.
 
