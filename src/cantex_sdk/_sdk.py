@@ -13,7 +13,7 @@ import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Awaitable, Callable, TypedDict
+from typing import Any, Awaitable, Callable, Iterable, TypedDict
 
 import aiohttp
 import ecdsa
@@ -54,6 +54,7 @@ __all__ = [
     "WithdrawalRequestedEvent",
     "WithdrawalCompletedEvent",
     "WithdrawalFailedEvent",
+    "TickerEvent",
     "BaseSigner",
     "OperatorKeySigner",
     "IntentTradingKeySigner",
@@ -1020,6 +1021,34 @@ class WithdrawalFailedEvent(FundingEvent):
         return cls(**FundingEvent._from_raw(raw).__dict__)
 
 
+@dataclass(frozen=True)
+class TickerEvent(WsEvent):
+    """A market ticker update from a public channel subscription.
+
+    Ticker frames have a different shape than the standard event-bus
+    payloads -- they are keyed by ``channel`` (e.g. ``market.BTC-USDC.ticker``)
+    and carry a ``snapshot`` or ``update`` value as ``event_type``.
+    """
+
+    channel: str
+    market: str
+    price: Decimal
+    price_ts: int
+    server_ts: int
+
+    @classmethod
+    def _from_raw(cls, raw: dict) -> TickerEvent:
+        d = raw.get("data", {})
+        return cls(
+            **WsEvent._from_raw(raw).__dict__,
+            channel=raw.get("channel", ""),
+            market=d.get("market", ""),
+            price=Decimal(str(d.get("price", "0"))),
+            price_ts=int(d.get("ts", 0)),
+            server_ts=int(raw.get("ts", 0)),
+        )
+
+
 # ---------------------------------------------------------------------------
 # WebSocket event parser
 # ---------------------------------------------------------------------------
@@ -1039,6 +1068,9 @@ _WS_EVENT_PARSERS: dict[str, type[WsEvent]] = {
 
 def _parse_ws_event(raw: dict) -> WsEvent:
     """Parse a raw WebSocket JSON dict into a typed event."""
+    channel = raw.get("channel", "")
+    if isinstance(channel, str) and channel.endswith(".ticker"):
+        return TickerEvent._from_raw(raw)
     event_type = raw.get("type", "")
     cls = _WS_EVENT_PARSERS.get(event_type, WsEvent)
     return cls._from_raw(raw)
@@ -1076,6 +1108,7 @@ class CantexWebSocket:
         self._max_reconnects = max_reconnects
         self._reconnect_base_delay = reconnect_base_delay
         self._closed_by_user = False
+        self._subscriptions: dict[str, None] = {}
 
     async def __aenter__(self) -> CantexWebSocket:
         return self
@@ -1100,12 +1133,55 @@ class CantexWebSocket:
             try:
                 self._ws = await self._reconnect_fn()
                 logger.info("WS reconnected")
+                if self._subscriptions:
+                    channels = list(self._subscriptions)
+                    logger.info("WS replaying subscriptions: %s", channels)
+                    await self._ws.send_json(
+                        {"op": "subscribe", "channels": channels},
+                    )
                 return
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 logger.warning("WS reconnect attempt %d failed: %s", attempt, exc)
         raise CantexError(
             f"WebSocket reconnection failed after {self._max_reconnects} attempts"
         )
+
+    async def subscribe(self, channels: Iterable[str]) -> None:
+        """Subscribe to one or more public channels.
+
+        Tracked internally so they are automatically re-sent if the
+        connection drops and is re-established.
+        """
+        if isinstance(channels, str):
+            raise TypeError(
+                "channels must be an iterable of channel names, not a single "
+                "string; did you mean [channels]?"
+            )
+        new = [c for c in dict.fromkeys(channels) if c not in self._subscriptions]
+        if not new:
+            return
+        await self._ws.send_json({"op": "subscribe", "channels": new})
+        for c in new:
+            self._subscriptions[c] = None
+
+    async def unsubscribe(self, channels: Iterable[str]) -> None:
+        """Unsubscribe from one or more previously-subscribed channels."""
+        if isinstance(channels, str):
+            raise TypeError(
+                "channels must be an iterable of channel names, not a single "
+                "string; did you mean [channels]?"
+            )
+        to_remove = [c for c in dict.fromkeys(channels) if c in self._subscriptions]
+        if not to_remove:
+            return
+        await self._ws.send_json({"op": "unsubscribe", "channels": to_remove})
+        for c in to_remove:
+            self._subscriptions.pop(c, None)
+
+    @property
+    def subscriptions(self) -> tuple[str, ...]:
+        """Currently-tracked channel subscriptions, in subscription order."""
+        return tuple(self._subscriptions)
 
     async def __anext__(self) -> WsEvent:
         while True:
@@ -1138,9 +1214,13 @@ class CantexWebSocket:
             else:
                 raise StopAsyncIteration
 
-            if raw.get("op") == "ping":
+            op = raw.get("op")
+            if op == "ping":
                 logger.debug("WS ping received, sending pong")
                 await self._ws.send_json({"op": "pong"})
+                continue
+            if op in ("subscribe", "unsubscribe", "subscribed", "unsubscribed"):
+                logger.debug("WS %s ack: %s", op, raw)
                 continue
 
             return _parse_ws_event(raw)
@@ -1499,11 +1579,14 @@ class CantexSDK:
         path: str,
         *,
         authenticated: bool = False,
+        channels: Iterable[str] | None = None,
     ) -> CantexWebSocket:
         """Open a WebSocket connection and return a :class:`CantexWebSocket`.
 
         The returned wrapper is tracked internally so it is closed
-        automatically when :meth:`close` is called.
+        automatically when :meth:`close` is called. If ``channels`` is
+        provided, a ``subscribe`` frame is sent immediately after the
+        connection is established.
         """
         session = await self._get_session()
         url = f"{self._ws_base_url}{path}"
@@ -1524,18 +1607,33 @@ class CantexSDK:
         )
         self._open_websockets = [w for w in self._open_websockets if not w.closed]
         self._open_websockets.append(ws)
+        if channels:
+            await ws.subscribe(channels)
         return ws
 
-    def connect_public_ws(self) -> _WebSocketConnect:
+    def connect_public_ws(
+        self,
+        *,
+        channels: Iterable[str] | None = None,
+    ) -> _WebSocketConnect:
         """Connect to the public event stream (no authentication required).
+
+        Optionally subscribe to one or more channels (e.g.
+        ``"market.BTC-USDC.ticker"``) immediately after the connection
+        is established. Tracked subscriptions are automatically re-sent
+        on reconnect.
 
         Returns an awaitable async-context-manager::
 
-            async with sdk.connect_public_ws() as ws:
+            async with sdk.connect_public_ws(
+                channels=["market.BTC-USDC.ticker"],
+            ) as ws:
                 async for event in ws:
                     print(event)
         """
-        return _WebSocketConnect(self._ws_connect("/v1/ws/public"))
+        return _WebSocketConnect(
+            self._ws_connect("/v1/ws/public", channels=channels),
+        )
 
     def connect_private_ws(self) -> _WebSocketConnect:
         """Connect to the private event stream (requires authentication).

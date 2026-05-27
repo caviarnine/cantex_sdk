@@ -45,6 +45,7 @@ from cantex_sdk import (
     SwapFailedEvent,
     SwapPendingEvent,
     SwapQuote,
+    TickerEvent,
     TokenBalance,
     WithdrawalCompletedEvent,
     WithdrawalFailedEvent,
@@ -1836,6 +1837,218 @@ class TestSDKWebSocketMethods:
             _ = await authed_sdk.connect_public_ws()
             assert len(authed_sdk._open_websockets) == 2
             assert ws1 not in authed_sdk._open_websockets
+        await authed_sdk.close()
+
+
+# ===================================================================
+# WebSocket — ticker subscription & parsing
+# ===================================================================
+
+
+SAMPLE_TICKER_SNAPSHOT_RAW = {
+    "channel": "market.BTC-USDC.ticker",
+    "data": {
+        "market": "BTC-USDC",
+        "price": "75695.6",
+        "ts": 1779861298569,
+    },
+    "ts": 1779861446590,
+    "type": "snapshot",
+}
+
+
+@pytest.mark.asyncio
+class TestTickerSubscription:
+    async def test_ticker_snapshot_parsing(self):
+        raw = _mock_raw_ws([
+            _make_ws_msg(
+                aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_TICKER_SNAPSHOT_RAW),
+            ),
+        ])
+        ws = CantexWebSocket(raw)
+        event = await ws.__anext__()
+        assert isinstance(event, TickerEvent)
+        assert event.channel == "market.BTC-USDC.ticker"
+        assert event.market == "BTC-USDC"
+        assert event.price == Decimal("75695.6")
+        assert event.price_ts == 1779861298569
+        assert event.server_ts == 1779861446590
+        assert event.event_type == "snapshot"
+        assert event.raw == SAMPLE_TICKER_SNAPSHOT_RAW
+
+    async def test_ticker_update_parsing(self):
+        update = {**SAMPLE_TICKER_SNAPSHOT_RAW, "type": "update"}
+        raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.TEXT, json.dumps(update)),
+        ])
+        ws = CantexWebSocket(raw)
+        event = await ws.__anext__()
+        assert isinstance(event, TickerEvent)
+        assert event.event_type == "update"
+
+    async def test_subscribe_sends_op_frame(self):
+        raw = _mock_raw_ws([])
+        ws = CantexWebSocket(raw)
+        await ws.subscribe(["market.BTC-USDC.ticker"])
+        raw.send_json.assert_awaited_once_with(
+            {"op": "subscribe", "channels": ["market.BTC-USDC.ticker"]},
+        )
+        assert ws.subscriptions == ("market.BTC-USDC.ticker",)
+
+    async def test_subscribe_preserves_insertion_order(self):
+        raw = _mock_raw_ws([])
+        ws = CantexWebSocket(raw)
+        await ws.subscribe(["market.ETH-USDC.ticker", "market.BTC-USDC.ticker"])
+        assert ws.subscriptions == (
+            "market.ETH-USDC.ticker",
+            "market.BTC-USDC.ticker",
+        )
+
+    async def test_subscribe_deduplicates(self):
+        raw = _mock_raw_ws([])
+        ws = CantexWebSocket(raw)
+        await ws.subscribe(["market.BTC-USDC.ticker"])
+        raw.send_json.reset_mock()
+        await ws.subscribe(["market.BTC-USDC.ticker"])
+        raw.send_json.assert_not_awaited()
+
+    async def test_subscribe_rejects_bare_string(self):
+        raw = _mock_raw_ws([])
+        ws = CantexWebSocket(raw)
+        with pytest.raises(TypeError, match="iterable of channel names"):
+            await ws.subscribe("market.BTC-USDC.ticker")
+        raw.send_json.assert_not_awaited()
+
+    async def test_unsubscribe_rejects_bare_string(self):
+        raw = _mock_raw_ws([])
+        ws = CantexWebSocket(raw)
+        with pytest.raises(TypeError, match="iterable of channel names"):
+            await ws.unsubscribe("market.BTC-USDC.ticker")
+        raw.send_json.assert_not_awaited()
+
+    async def test_unsubscribe_removes_channel(self):
+        raw = _mock_raw_ws([])
+        ws = CantexWebSocket(raw)
+        await ws.subscribe(["market.BTC-USDC.ticker", "market.ETH-USDC.ticker"])
+        raw.send_json.reset_mock()
+        await ws.unsubscribe(["market.BTC-USDC.ticker"])
+        raw.send_json.assert_awaited_once_with(
+            {"op": "unsubscribe", "channels": ["market.BTC-USDC.ticker"]},
+        )
+        assert ws.subscriptions == ("market.ETH-USDC.ticker",)
+
+    async def test_unsubscribe_unknown_channel_noop(self):
+        raw = _mock_raw_ws([])
+        ws = CantexWebSocket(raw)
+        await ws.unsubscribe(["market.BTC-USDC.ticker"])
+        raw.send_json.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "ack_op",
+        ["subscribe", "subscribed", "unsubscribe", "unsubscribed"],
+    )
+    async def test_subscription_ack_skipped(self, ack_op):
+        ack = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT,
+            json.dumps({
+                "op": ack_op,
+                "channels": ["market.BTC-USDC.ticker"],
+                "total_subscriptions": 1,
+            }),
+        )
+        ticker = _make_ws_msg(
+            aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_TICKER_SNAPSHOT_RAW),
+        )
+        raw = _mock_raw_ws([ack, ticker])
+        ws = CantexWebSocket(raw)
+        event = await ws.__anext__()
+        assert isinstance(event, TickerEvent)
+
+    async def test_resubscribe_on_reconnect(self):
+        new_raw = _mock_raw_ws([
+            _make_ws_msg(
+                aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_TICKER_SNAPSHOT_RAW),
+            ),
+        ])
+        reconnect_fn = AsyncMock(return_value=new_raw)
+        old_raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.CLOSE, 1006),
+        ])
+        ws = CantexWebSocket(
+            old_raw,
+            reconnect=reconnect_fn,
+            max_reconnects=3,
+            reconnect_base_delay=0.0,
+        )
+        await ws.subscribe([
+            "market.BTC-USDC.ticker",
+            "market.ETH-USDC.ticker",
+        ])
+        old_raw.send_json.reset_mock()
+        new_raw.send_json.reset_mock()
+
+        event = await ws.__anext__()
+        assert isinstance(event, TickerEvent)
+        reconnect_fn.assert_awaited_once()
+        new_raw.send_json.assert_awaited_once_with(
+            {
+                "op": "subscribe",
+                "channels": [
+                    "market.BTC-USDC.ticker",
+                    "market.ETH-USDC.ticker",
+                ],
+            },
+        )
+
+    async def test_no_resubscribe_when_no_subscriptions(self):
+        new_raw = _mock_raw_ws([
+            _make_ws_msg(
+                aiohttp.WSMsgType.TEXT, json.dumps(SAMPLE_TICKER_SNAPSHOT_RAW),
+            ),
+        ])
+        reconnect_fn = AsyncMock(return_value=new_raw)
+        old_raw = _mock_raw_ws([
+            _make_ws_msg(aiohttp.WSMsgType.CLOSE, 1006),
+        ])
+        ws = CantexWebSocket(
+            old_raw,
+            reconnect=reconnect_fn,
+            max_reconnects=3,
+            reconnect_base_delay=0.0,
+        )
+        await ws.__anext__()
+        new_raw.send_json.assert_not_awaited()
+
+    async def test_parse_ws_event_dispatches_ticker(self):
+        event = _parse_ws_event(SAMPLE_TICKER_SNAPSHOT_RAW)
+        assert isinstance(event, TickerEvent)
+        assert event.market == "BTC-USDC"
+
+    async def test_connect_public_ws_with_channels(self, authed_sdk):
+        mock_raw_ws = _mock_raw_ws([])
+        with patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, return_value=mock_raw_ws,
+        ):
+            ws = await authed_sdk.connect_public_ws(
+                channels=["market.BTC-USDC.ticker"],
+            )
+            mock_raw_ws.send_json.assert_awaited_once_with(
+                {"op": "subscribe", "channels": ["market.BTC-USDC.ticker"]},
+            )
+            assert ws.subscriptions == ("market.BTC-USDC.ticker",)
+            await ws.close()
+        await authed_sdk.close()
+
+    async def test_connect_public_ws_without_channels(self, authed_sdk):
+        mock_raw_ws = _mock_raw_ws([])
+        with patch.object(
+            aiohttp.ClientSession, "ws_connect",
+            new_callable=AsyncMock, return_value=mock_raw_ws,
+        ):
+            ws = await authed_sdk.connect_public_ws()
+            mock_raw_ws.send_json.assert_not_awaited()
+            await ws.close()
         await authed_sdk.close()
 
 

@@ -101,7 +101,7 @@ Use as an async context manager (`async with CantexSDK(...) as sdk`) or call `aw
 
 | Method | Auth | Description |
 | --- | --- | --- |
-| `connect_public_ws()` | No | Public event stream |
+| `connect_public_ws(channels=None)` | No | Public event stream; optionally subscribe to channels on connect |
 | `connect_private_ws()` | Yes | Private event stream |
 
 Both return an awaitable async-context-manager:
@@ -113,6 +113,22 @@ async with sdk.connect_private_ws() as ws:
 ```
 
 `CantexWebSocket` handles ping/pong keep-alive and reconnects with exponential backoff on unexpected drops.
+
+#### Public channel subscriptions
+
+The public stream supports subscription-based channels such as market tickers. Subscribe at connect time or any time afterwards; tracked subscriptions are automatically re-sent on reconnect.
+
+```python
+async with sdk.connect_public_ws(
+    channels=["market.BTC-USDC.ticker"],
+) as ws:
+    async for event in ws:
+        if isinstance(event, TickerEvent):
+            print(event.market, event.price)
+
+    await ws.subscribe(["market.ETH-USDC.ticker"])
+    await ws.unsubscribe(["market.BTC-USDC.ticker"])
+```
 
 ## Response Models
 
@@ -177,6 +193,14 @@ All extend `FundingEvent` which adds: `amount`, `instrument`, `sender`, `receive
 | `WithdrawalRequestedEvent` | `execute_before`, `requested_at` |
 | `WithdrawalCompletedEvent` | — |
 | `WithdrawalFailedEvent` | — |
+
+### Market Data Events
+
+| Event | Key Fields |
+| --- | --- |
+| `TickerEvent` | `channel`, `market`, `price`, `price_ts`, `server_ts` |
+
+Yielded from the public WebSocket when subscribed to a `market.<MARKET>.ticker` channel. `event_type` is `"snapshot"` for the first frame after subscribing and `"update"` for incremental price changes.
 
 ## Error Handling
 

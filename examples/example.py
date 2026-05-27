@@ -33,6 +33,7 @@ from cantex_sdk import (
     SwapExecutedEvent,
     SwapFailedEvent,
     SwapPendingEvent,
+    TickerEvent,
 )
 
 logging.basicConfig(
@@ -209,6 +210,21 @@ async def main() -> None:
         #             )
         #         else:
         #             log.info("Event [%s]: %s", event.event_type, event.data)
+
+        # ── 12. Stream public ticker prices ────────────────────────────
+        # log.info("Subscribing to BTC-USDC ticker...")
+        # async with sdk.connect_public_ws(
+        #     channels=["market.BTC-USDC.ticker"],
+        # ) as ws:
+        #     async for event in ws:
+        #         if isinstance(event, TickerEvent):
+        #             log.info(
+        #                 "Ticker [%s] %s = %s (ts=%d)",
+        #                 event.event_type,
+        #                 event.market,
+        #                 event.price,
+        #                 event.price_ts,
+        #             )
 
     log.info("Done -- session closed")
 
